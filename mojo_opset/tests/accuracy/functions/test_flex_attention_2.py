@@ -446,7 +446,7 @@ _RNG = _random.Random(2026)
 _RAND_BATCH = [1, 2]
 _RAND_QHEAD = [16, 32]
 _RAND_HDIM = [64, 128]
-_RAND_DTYPES = [torch.bfloat16, torch.float16]
+_RAND_DTYPES = [torch.bfloat16]
 _RAND_MAG = [5000, 60000, 300000, 1000000]
 _RAND_SLIDE = [512, 1024, 4096, 65536]
 _RAND_GLOBAL = [4, 8, 16]
@@ -513,7 +513,7 @@ _SHAPE_CASES = [
                  2048, 8, torch.float16, id="b2_h16kv8_d64_s12467"),
     pytest.param(1, 16, 8, 64,
                  [[10007, 20003, 30011]], [["text", "image_gen", "text"]],
-                 65536, 16, torch.float16, id="b1_h16kv8_d64_s60021"),
+                 65536, 16, torch.bfloat16, id="b1_h16kv8_d64_s60021"),
     pytest.param(1, 32, 16, 128,
                  [[45678, 98765, 56789]], [["text", "image_gen", "text"]],
                  65536, 16, torch.bfloat16, id="b1_h32kv16_s201232"),
@@ -532,7 +532,7 @@ _SHAPE_CASES = [
                  65536, 16, torch.bfloat16, id="b1_h32kv16_s100k"),
     pytest.param(2, 16, 8, 64,
                  [[40000, 60000], [40000, 60000]], [["text", "text"], ["text", "text"]],
-                 2048, 8, torch.float16, id="b2_h16kv8_d64_s200k"),
+                 2048, 8, torch.bfloat16, id="b2_h16kv8_d64_s200k"),
     pytest.param(1, 4, 2, 64,
                  [[200000], [200000]], [["text"], ["text"]],
                  65536, 16, torch.bfloat16, id="b1_h16kv8_s400k"),

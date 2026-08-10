@@ -1,0 +1,29 @@
+mojo_opset/tests/accuracy/functions/test_flex_attention_2.py
+  h_301d14e9f75767 1,296-304,306,309-315,317-371,374-376,381,385-389,391-393,395-422,428-430,433,572,581-583,585,599,603-608,611-615,622-638
+mojo_opset/tests/accuracy/functions/test_flex_attention_3.py
+  h_301d14e9f75767 207-211,214,222-224,226-286,289-291,296,301-305,307-319,324-331,337-339,577,626-630
+  s_2c269b81b45a49::t_417ff87d341cb0 292-294,306,320-323,332-336,345-349,351,586-590,598,602-607,631-641,643-648
+mojo_opset/tests/perf/test_flex_attention_mfu_3.py
+  s_2c269b81b45a49::t_3e00f0d23e8b61 243-259,265-268,270,346
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "7ec837553ad3c5912785d9f43bab7cbaa4714fdd",
+  "prompts": {},
+  "humans": {
+    "h_301d14e9f75767": {
+      "author": "kevin-hongkai <253715840@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_2c269b81b45a49": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a6af329b7025efc78cfe547",
+        "model": "glm-5.2__dev"
+      },
+      "human_author": "kevin-hongkai <253715840@qq.com>"
+    }
+  }
+}

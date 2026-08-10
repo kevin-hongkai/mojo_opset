@@ -1,0 +1,18 @@
+mojo_opset/tests/accuracy/functions/test_flex_attention_3.py
+  h_301d14e9f75767 1-4,10,15-23,33,35,37-38,40-42,44,46-62,64-69,71-73,75-181,183-191,193,195-206,208-219,221-233,235,238,240,243-256,289-297,330,362,364-373
+mojo_opset/tests/accuracy/functions/test_flex_attention_2.py
+  h_301d14e9f75767 10,291,373-381,439,442,445,448,493-502
+mojo_opset/tests/perf/test_flex_attention_mfu_3.py
+  h_301d14e9f75767 203,206-209,221,225,237-255,257,289-297
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "66cb1eefbb3a65fd37fa90130454c6c78258d0aa",
+  "prompts": {},
+  "humans": {
+    "h_301d14e9f75767": {
+      "author": "kevin-hongkai <253715840@qq.com>"
+    }
+  }
+}

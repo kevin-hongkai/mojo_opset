@@ -200,9 +200,13 @@ def _perf_flex_attention(mask_func, problem=None):
     # mojo_packed: streaming stripe build (no full dense_mask materialized)
     gc.collect()
     torch.npu.empty_cache()
-    dense_mask = _build_dense_mask(mask_func, problem)
-    _sync()
-    n_element=dense_mask.to("cpu").sum().item()
+    if SEQ_LEN <= MAX_DENSE_SEQ:
+        dense_mask = _build_dense_mask(mask_func, problem)
+        _sync()
+        n_element = dense_mask.to("cpu").sum().item()
+    else:
+        # 大序列：分块统计激活元素，避免物化 [S,S] 稠密 mask 导致 OOM
+        n_element = _count_n_element(mask_func, problem)
     print(">>>>>>>>>>>>>>>>>>>>>>>>>>>dense_mask.sum().item() in perf", n_element)
     results["mojo_packed"] = _perf_benchmark(
         "mojo_packed",
@@ -214,20 +218,42 @@ def _perf_flex_attention(mask_func, problem=None):
         n_element,
     )
 
-    # ascendc: torch SDPA + dense_mask
+    # ascendc: torch SDPA + dense_mask（仅小序列，大序列避免物化稠密 mask）
     gc.collect()
     torch.npu.empty_cache()
 
-    results["ascendc"] = _perf_benchmark(
-        "ascendc",
-        lambda: _build_dense_mask(mask_func, problem),
-        lambda q, k, v, m: _sdpa_with_dense_mask(q, k, v, m, 0.0, None),
-        problem["q"], problem["k"], problem["v"],
-        prof_dir_root,
-        mask_func,
-        None
-    )
+    if SEQ_LEN <= MAX_DENSE_SEQ:
+        results["ascendc"] = _perf_benchmark(
+            "ascendc",
+            lambda: _build_dense_mask(mask_func, problem),
+            lambda q, k, v, m: _sdpa_with_dense_mask(q, k, v, m, 0.0, None),
+            problem["q"], problem["k"], problem["v"],
+            prof_dir_root,
+            mask_func,
+            None
+        )
     return results
+
+# ============================================================================
+# 分块统计 mask 激活元素（大序列避免物化全量稠密 mask）
+# ============================================================================
+MAX_DENSE_SEQ = 20000
+
+
+def _count_n_element(mask_func, problem, q_chunk=1024):
+    mask_mod = mask_func(problem)
+    S = problem["total_s"]
+    device = problem["q"].device
+    total = 0
+    for qs in range(0, S, q_chunk):
+        qe = min(qs + q_chunk, S)
+        cb = qe - qs
+        q_idx = torch.arange(qs, qe, device=device)[:, None].expand(cb, S)
+        kv_idx = torch.arange(0, S, device=device)[None, :].expand(cb, S)
+        m = mask_mod(0, 0, q_idx, kv_idx)
+        total += int(m.sum().item())
+    return total
+
 
 # ============================================================================
 # 随机用例生成（固定种子保证可复现，同时保证随机性）
@@ -259,11 +285,16 @@ def _random_positive_split(rng, total, k):
 
 def _make_random_case(rng):
     batch = rng.choice(_RAND_BATCH)
-    q_head = rng.choice(_RAND_QHEAD)
-    kv_head = rng.choice([h for h in [8, 16] if h <= q_head])
-    hdim = rng.choice(_RAND_HDIM)
-    n_samples = rng.randint(1, 3)
     mag = rng.choice(_RAND_MAG)
+    # 大序列（300k/1M）用较小的 head/dim，避免 q/k/v 与参考比对在 60GiB 卡上显存溢出
+    if mag >= 300000:
+        q_head = rng.choice([4, 8])
+        hdim = 64
+    else:
+        q_head = rng.choice(_RAND_QHEAD)
+        hdim = rng.choice(_RAND_HDIM)
+    kv_head = rng.choice([h for h in [2, 4, 8, 16] if h <= q_head])
+    n_samples = rng.randint(1, 3)
     weights = [rng.random() for _ in range(n_samples)]
     wsum = sum(weights) or 1.0
     sample_totals = [max(int(mag * w / wsum), 2) for w in weights]

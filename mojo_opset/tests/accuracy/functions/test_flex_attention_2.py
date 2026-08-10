@@ -7,7 +7,7 @@ from mojo_opset.utils.platform import get_platform
 from mojo_opset.backends.ttx.kernels.npu.flex_attention import create_block_mask_patched
 from mojo_opset.backends.ttx.kernels.npu.flex_attention import MASK_BLOCK_SIZE
 
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _device
+from mojo_opset.tests.accuracy.functions.test_flex_attention import _build_dense_mask, _device, _sdpa_with_dense_mask
 from mojo_opset.tests.accuracy.functions.test_flex_attention import _sync
 from mojo_opset.tests.accuracy.functions.test_flex_attention import build_problem
 from mojo_opset.tests.accuracy.functions.test_flex_attention import _flex_attention_mojo
@@ -288,7 +288,7 @@ _MASK_FUNCS_2 = [
 ]
 _MASK_FUNC_TO_TYPE_2 = {id(fn): name for name, fn in _MASK_FUNCS_2}
 
-
+MAX_DENSE_SEQ = 20000
 # ============================================================================
 # 分块参考实现：不物化全量稠密 mask，支持最大 1M 序列长度
 # ============================================================================
@@ -369,11 +369,16 @@ def _random_positive_split(rng, total, k):
 
 def _make_random_case(rng):
     batch = rng.choice(_RAND_BATCH)
-    q_head = rng.choice(_RAND_QHEAD)
-    kv_head = rng.choice([h for h in [8, 16] if h <= q_head])
-    hdim = rng.choice(_RAND_HDIM)
-    n_samples = rng.randint(1, 3)
     mag = rng.choice(_RAND_MAG)
+    # 大序列（300k/1M）用较小的 head/dim，避免 q/k/v 与参考比对在 60GiB 卡上显存溢出
+    if mag >= 300000:
+        q_head = rng.choice([4, 8])
+        hdim = 64
+    else:
+        q_head = rng.choice(_RAND_QHEAD)
+        hdim = rng.choice(_RAND_HDIM)
+    kv_head = rng.choice([h for h in [2, 4, 8, 16] if h <= q_head])
+    n_samples = rng.randint(1, 3)
     weights = [rng.random() for _ in range(n_samples)]
     wsum = sum(weights) or 1.0
     sample_totals = [max(int(mag * w / wsum), 2) for w in weights]
@@ -431,16 +436,16 @@ _SHAPE_CASES = [
     pytest.param(2, 16, 8, 64,
                  [[40000, 60000], [40000, 60000]], [["text", "text"], ["text", "text"]],
                  2048, 8, torch.float16, id="b2_h16kv8_d64_s200k"),
-    pytest.param(1, 16, 8, 128,
+    pytest.param(1, 4, 2, 64,
                  [[200000], [200000]], [["text"], ["text"]],
                  65536, 16, torch.bfloat16, id="b1_h16kv8_s400k"),
-    pytest.param(2, 32, 16, 128,
+    pytest.param(2, 4, 2, 64,
                  [[100000, 150000], [200000, 250000]], [["text", "text"], ["text", "text"]],
                  65536, 16, torch.bfloat16, id="b2_h32kv16_s700000"),
-    pytest.param(1, 16, 8, 128,
+    pytest.param(1, 4, 2, 64,
                  [[333333, 333333, 333334]], [["text", "image_gen", "text"]],
                  65536, 16, torch.bfloat16, id="b1_h16kv8_s1M"),
-    pytest.param(1, 16, 8, 128,
+    pytest.param(1, 4, 2, 64,
                  [[1000000]], [["text"]], 65536, 16, torch.bfloat16, id="b1_h16kv8_s1M_single"),
 ] + _RANDOM_CASES_2
 
@@ -485,7 +490,17 @@ def test_flex_attention_2(batch_size, q_head, kv_head, head_dim, data_lens, data
     mojo_output = _flex_attention_mojo(q_mojo, k_mojo, v_mojo, None, packed_block_mask, 0.0, None)
     _sync()
 
-    ref_output = _sdpa_chunked_reference(q_ref, k_ref, v_ref, mask_func, problem, 0.0)
+    if SEQ_LEN <= MAX_DENSE_SEQ:
+        # 小序列：走全量稠密 mask 参考路径
+        dense_mask = _build_dense_mask(mask_func, problem)
+        _sync()
+        print(">>>>>>>>>>>>>>>>>>>>>>>>>>>dense_mask.sum().item()", dense_mask.to("cpu").sum().item())
+        ref_output = _sdpa_with_dense_mask(q_ref, k_ref, v_ref, dense_mask, 0.0, None)
+    else:
+        # 大序列：用分块参考，避免物化 [S,S] 稠密 mask 导致 OOM
+        n_element = _count_n_element(mask_func, problem)
+        print(">>>>>>>>>>>>>>>>>>>>>>>>>>>dense_mask.sum().item() (chunked)", n_element)
+        ref_output = _sdpa_chunked_reference(q_ref, k_ref, v_ref, mask_func, problem, 0.0)
     _sync()
 
     assert mojo_output.shape == ref_output.shape

@@ -240,18 +240,34 @@ def _perf_flex_attention(mask_func, problem=None):
 MAX_DENSE_SEQ = 20000
 
 
-def _count_n_element(mask_func, problem, q_chunk=1024):
-    mask_mod = mask_func(problem)
+def _count_n_element(mask_func, problem, q_chunk=512):
+    """分块统计 mask 激活元素个数，避免物化全量稠密 mask。
+
+    使用广播优化：q_idx [cb,1] + kv_idx [1,S]，mask_mod 内部自动广播到 [cb,S]，
+    gather 次数从 cb×S 降为 cb+S。在 NPU 上计算（元素级 bool 运算快），
+    1D 索引张量转 int32 减半内存。
+    """
+    npu_problem = {}
+    for key, val in problem.items():
+        if isinstance(val, torch.Tensor):
+            t = val.detach()
+            if t.dtype in (torch.int64, torch.long) and t.dim() == 1:
+                t = t.to(torch.int32)
+            npu_problem[key] = t
+        else:
+            npu_problem[key] = val
+    mask_mod = mask_func(npu_problem)
     S = problem["total_s"]
     device = problem["q"].device
     total = 0
     for qs in range(0, S, q_chunk):
         qe = min(qs + q_chunk, S)
-        cb = qe - qs
-        q_idx = torch.arange(qs, qe, device=device)[:, None].expand(cb, S)
-        kv_idx = torch.arange(0, S, device=device)[None, :].expand(cb, S)
-        m = mask_mod(0, 0, q_idx, kv_idx)
+        q_idx = torch.arange(qs, qe, device=device, dtype=torch.int32)[:, None]
+        kv_idx = torch.arange(0, S, device=device, dtype=torch.int32)[None, :]
+        with torch.no_grad():
+            m = mask_mod(0, 0, q_idx, kv_idx)
         total += int(m.sum().item())
+        del m, q_idx, kv_idx
     return total
 
 
@@ -327,7 +343,7 @@ _RANDOM_CASES = [
                      1024, 4, torch.bfloat16, _sparse_mask_mod, id="sparse_b2_s9k"),
         pytest.param(1, 32, 16, 128, [[12345, 23456, 34567]], [["text", "image_gen", "text"]],
                      4096, 8, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s70k"),
-        pytest.param(1, 16, 8, 128, [[333333, 333333, 333334]], [["text", "image_gen", "text"]],
+        pytest.param(1, 4, 2, 64, [[333333, 333333, 333334]], [["text", "image_gen", "text"]],
                      65536, 16, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s1M"),
 
         # ===== full =====

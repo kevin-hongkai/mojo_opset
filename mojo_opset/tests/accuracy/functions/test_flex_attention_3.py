@@ -200,7 +200,7 @@ def _sdpa_with_dense_mask(query_states, key_states, value_states, attention_mask
 MAX_DENSE_SEQ = 20000
 
 
-def _sdpa_chunked_reference(q, k, v, mask_func, problem, dropout_rate=0.0, q_chunk=1024):
+def _sdpa_chunked_reference(q, k, v, mask_func, problem, dropout_rate=0.0, q_chunk=None):
     """q/k/v 为 [B, H, S, D] (head-first), 返回 [B, S, H, D]。
 
     分块计算参考注意力，不物化 [S, S] 全量稠密 mask，因此大 seq（1M）也不会 OOM。
@@ -208,6 +208,14 @@ def _sdpa_chunked_reference(q, k, v, mask_func, problem, dropout_rate=0.0, q_chu
     mask_mod = mask_func(problem)
     B, H, S, D = q.shape
     device = q.device
+    if q_chunk is None:
+        # 按当前空闲显存自适应分块，控制 mask_mod 每块临时张量峰值，避免 1M 大序列 OOM
+        try:
+            free_bytes = torch.npu.mem_get_info()[0]
+        except Exception:
+            free_bytes = int(8 * (1 << 30))
+        bytes_per_elt = 56  # 每个元素临时占用估算（int64 索引 + bool 结果等）
+        q_chunk = max(16, min(1024, int(0.25 * free_bytes / (bytes_per_elt * S))))
     chunks = []
     for qs in range(0, S, q_chunk):
         qe = min(qs + q_chunk, S)
@@ -482,20 +490,10 @@ def test_flex_attention(batch_size,q_head, kv_head, head_dim, data_lens, data_ty
 
     SEQ_LEN = problem["total_s"]
 
-    packed_block_mask = _build_block_mask(mask_func, problem)
-                                                  
-    _sync()
-
     return_grid = torch.tensor(SEQ_LEN, dtype=dtype, device=torch.device(_device()))
 
-    mojo_output = _flex_attention_mojo(q_mojo, k_mojo, v_mojo, None, packed_block_mask, 0.0, None)
-    _sync()
-
-    # 前向结束后释放 block mask 并清空缓存，为大序列参考路径腾出显存
-    del packed_block_mask
-    gc.collect()
-    torch.npu.empty_cache()
-
+    # 参考计算放在 mojo 前向之前：此时尚未 build packed_block_mask，显存几乎全空
+    # （仅 q/k/v 占用，1M 下 ~1GiB），给分块参考的 mask_mod 临时张量留出最大可用显存。
     if SEQ_LEN <= MAX_DENSE_SEQ:
         # 小序列：走全量稠密 mask 参考路径
         dense_mask = _build_dense_mask(mask_func, problem)
@@ -503,11 +501,23 @@ def test_flex_attention(batch_size,q_head, kv_head, head_dim, data_lens, data_ty
         print(">>>>>>>>>>>>>>>>>>>>>>>>>>>dense_mask.sum().item()", dense_mask.to("cpu").sum().item())
         ref_output = _sdpa_with_dense_mask(q_ref, k_ref, v_ref, dense_mask, 0.0, None)
     else:
-        # 大序列：用分块参考，避免物化 [S,S] 稠密 mask 导致 OOM
+        # 大序列：用分块参考，避免物化 [S,S] 稠密 mask 导致 OOM；q_chunk 按空闲显存自适应
         #n_element = _count_n_element(mask_func, problem)
         #print(">>>>>>>>>>>>>>>>>>>>>>>>>>>dense_mask.sum().item() (chunked)", n_element)
         ref_output = _sdpa_chunked_reference(q_ref, k_ref, v_ref, mask_func, problem, 0.0)
     _sync()
+
+    # 参考完成后才构建 block mask，供 mojo 前向使用
+    packed_block_mask = _build_block_mask(mask_func, problem)
+    _sync()
+
+    mojo_output = _flex_attention_mojo(q_mojo, k_mojo, v_mojo, None, packed_block_mask, 0.0, None)
+    _sync()
+
+    # mojo 前向完成后释放 block mask 并清空缓存，为反向腾出显存
+    del packed_block_mask
+    gc.collect()
+    torch.npu.empty_cache()
 
     assert mojo_output.shape == ref_output.shape
     torch.testing.assert_close(mojo_output.cpu(), ref_output.cpu(), atol=5e-3, rtol=5e-3)

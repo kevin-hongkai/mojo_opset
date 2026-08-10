@@ -194,7 +194,7 @@ def _perf_flex_attention_2(mask_func, problem):
     SEQ_LEN = problem["total_s"]
     mask_type_str = _MASK_FUNC_TO_TYPE_2[id(mask_func)]
 
-    prof_dir_root = os.path.join("./npu_profilling", mask_type_str)
+    prof_dir_root = os.path.join("./npu_profiling", mask_type_str)
     os.makedirs(prof_dir_root, exist_ok=True)
 
     results = {}

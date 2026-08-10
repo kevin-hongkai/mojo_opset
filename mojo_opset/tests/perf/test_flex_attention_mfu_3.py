@@ -1,6 +1,7 @@
 import csv
 import gc
 import os
+import time
 
 import pytest
 import torch
@@ -114,6 +115,7 @@ def _perf_benchmark(label, build_mask_fn, fwd_fn, q, k, v, prof_dir_root, mask_f
             out.float().mean().backward(return_grid)
             _sync()
             prof.step()
+            time.sleep(0.5)
     print(f"======================== prof end ({label}) ====================")
     if n_element is not None and os.path.exists(prof_dir):
         kernel_profiling_path = max(
@@ -192,7 +194,7 @@ def _perf_flex_attention(mask_func, problem=None):
     SEQ_LEN = problem["total_s"]
     mask_type_str = _MASK_FUNC_TO_TYPE[id(mask_func)]
 
-    prof_dir_root = os.path.join("./npu_profilling", mask_type_str)
+    prof_dir_root = os.path.join("./npu_profiling", mask_type_str)
     os.makedirs(prof_dir_root, exist_ok=True)
 
     results = {}
@@ -343,7 +345,7 @@ _RANDOM_CASES = [
                      1024, 4, torch.bfloat16, _sparse_mask_mod, id="sparse_b2_s9k"),
         pytest.param(1, 32, 16, 128, [[12345, 23456, 34567]], [["text", "image_gen", "text"]],
                      4096, 8, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s70k"),
-        pytest.param(1, 4, 2, 64, [[333333, 333333, 333334]], [["text", "image_gen", "text"]],
+        pytest.param(1, 16, 8, 128, [[333333, 333333, 333334]], [["text", "image_gen", "text"]],
                      65536, 16, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s1M"),
 
         # ===== full =====

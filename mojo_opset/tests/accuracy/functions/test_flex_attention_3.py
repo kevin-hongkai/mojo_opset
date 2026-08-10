@@ -1,26 +1,19 @@
-import csv
 import gc
-import os
-
 import pytest
 import torch
 import torch.nn.functional as F
 
+from mojo_opset.experimental import mojo_flex_attention
 from mojo_opset.tests.utils import bypass_not_implemented
-from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.utils.platform import get_platform
+from mojo_opset.utils.platform import get_torch_device
 from mojo_opset.backends.ttx.kernels.npu.utils import is_910
 from mojo_opset.backends.ttx.kernels.npu.flex_attention import _build_packed_block_mask_streaming
 from mojo_opset.backends.ttx.kernels.npu.flex_attention import create_block_mask_patched
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _sync
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _device
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _MASK_FUNC_TO_TYPE,GEN_MASK_TRITON
-from mojo_opset.tests.accuracy.functions.test_flex_attention import Q_BLOCK_SIZE, KV_BLOCK_SIZE
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _build_dense_mask,_sdpa_with_dense_mask
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _flex_attention_mojo,_build_block_mask
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _sparse_mask_mod ,_full_mask_mod
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _cross_sample_causal_video_bidir_mask_mod
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _video_stair_mask_mod ,_stair_mask_mod ,build_problem
+from mojo_opset.backends.ttx.kernels.npu.flex_attention import triton_create_mask
+from mojo_opset.backends.ttx.kernels.npu.flex_attention import MASK_BLOCK_SIZE
+from torch.nn.attention.flex_attention import flex_attention
+from torch.nn.attention.flex_attention import create_block_mask
 
 
 # NPU device validation monkey-patch (same as original test)
@@ -30,217 +23,218 @@ try:
 except Exception:
     pass
 
-_MB = 1024 ** 2
+GEN_MASK_TRITON = False
+USE_MOJO_FLEX_ATTENTION = True
+FULL_MASK_MODALITIES = ("image_gen", "image_vae")
+
+SEED = 0
+APPLY_Q_CHUNK = 2048
+Q_BLOCK_SIZE = 128
+KV_BLOCK_SIZE = 128
+
+def _device():
+    return get_torch_device()
+def _sync():
+    if _device() == "npu":
+        torch.npu.synchronize()
+    elif _device() == "cuda":
+        torch.cuda.synchronize()
+
 # ============================================================================
-# Performance benchmark (torch_npu.profiler based)
+# Mask function definitions
 # ============================================================================
-def _perf_benchmark(label, build_mask_fn, fwd_fn, q, k, v, prof_dir_root, mask_func,n_element):
-    import torch_npu
+def _sparse_mask_mod(problem):
+    segment_ids = problem["segment_ids"]
+    modality = problem["modality"]
+    doc_start = problem["doc_start"]
+    W = problem["sliding_window"]
+    G = problem["global_window"]
 
-    q = q.detach().requires_grad_(True)
-    k = k.detach().requires_grad_(True)
-    v = v.detach().requires_grad_(True)
-
-    return_grid = torch.tensor(520000, dtype=q.dtype, device=torch.device(_device()))
-
-    # mask build measurement: peak + stable
-    torch.npu.empty_cache()
-    torch.npu.reset_peak_memory_stats()
-    _sync()
-    mask = build_mask_fn()
-    mask_peak = torch.npu.max_memory_allocated() / _MB
-    torch.npu.empty_cache()
-    gc.collect()
-    _sync()
-    mask_mem = torch.npu.memory_allocated() / _MB
-
-    # fwd measurement (includes grad graph)
-    torch.npu.reset_peak_memory_stats()
-    _sync()
-    out = fwd_fn(q, k, v, mask)
-    _sync()
-    fwd_mem = torch.npu.max_memory_allocated() / _MB
-
-    # bwd measurement
-    torch.npu.reset_peak_memory_stats()
-    _sync()
-    out.float().mean().backward(return_grid)
-    _sync()
-    bwd_mem = torch.npu.max_memory_allocated() / _MB
-
-    q.grad = k.grad = v.grad = None
-    peak_mem = max(fwd_mem, bwd_mem)
-    print(f"[{label}] mask: {mask_mem:.1f}MB(peak:{mask_peak:.1f}MB), fwd_mem: {fwd_mem:.1f}MB, bwd_mem: {bwd_mem:.1f}MB, peak: {peak_mem:.1f}MB")
-
-    # ===== torch_npu.profiler based timing =====
-    prof_dir = os.path.join(prof_dir_root, label)
-    os.makedirs(prof_dir, exist_ok=True)
-
-    experimental_config = torch_npu.profiler._ExperimentalConfig(
-        aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
-        profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
-        l2_cache=False,
-    )
-
-    print(f"\n======================== prof begin ({label}) ====================")
-    with torch_npu.profiler.profile(
-        activities=[torch_npu.profiler.ProfilerActivity.NPU],
-        with_stack=False,
-        record_shapes=False,
-        profile_memory=False,
-        schedule=torch_npu.profiler.schedule(
-            wait=1, warmup=1, active=10, repeat=1, skip_first=1
-        ),
-        experimental_config=experimental_config,
-        on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(prof_dir),
-    ) as prof:
-        for i in range(12):
-            # 重新构造数据，避免L2 Cache影响
-            # problem = build_problem(mask_func)
-            # q = problem["q"].detach().clone().requires_grad_(True)
-            # k = problem["k"].detach().clone().requires_grad_(True)
-            # v = problem["v"].detach().clone().requires_grad_(True)
-
-            out = fwd_fn(q, k, v, mask)
-            _sync()
-
-            # 插入其他算子，重置L2 Cache, 112M，总访存224MB覆盖112MB L2, 模拟整网调用场景
-            for j in range(5):
-                a = torch.randn(19573419, dtype=torch.float32, device="cpu").to(q.device)
-                b = torch.randn(19573419, dtype=torch.float32, device="cpu").to(q.device)
-                c = a + b       # 冲刷全部L2
-            _sync()
-
-            out.float().mean().backward(return_grid)
-            _sync()
-            prof.step()
-    print(f"======================== prof end ({label}) ====================")
-    if n_element is not None and os.path.exists(prof_dir):
-        kernel_profiling_path = max(
-            [
-                os.path.join(prof_dir, d)
-                for d in os.listdir(prof_dir)
-                if os.path.isdir(os.path.join(prof_dir, d))
-            ],
-            key=os.path.getmtime,
-        )
-        csv_file_path = os.path.join(kernel_profiling_path, "ASCEND_PROFILER_OUTPUT", "op_statistic.csv")
-
-        if os.path.exists(csv_file_path):
-            kernel_times = {}
-            with open(csv_file_path, mode="r", newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    kernel_name = row["OP Type"]
-                    for target in [
-                        "flex_attention_backward_dkdv_kernel_tasklist",
-                        "flex_attention_backward_dkdv_kernel",
-                        "flex_attention_backward_dq_kernel",
-                        "flex_attention_kernel",
-                    ]:
-                        if target in kernel_name:
-                            kernel_times[target] = float(row["Avg Time(us)"])
-                            break
-
-            active_steps = 5
-            peak_tflops = 378.0
-
-            num_n_elements = {
-                "flex_attention_backward_dkdv_kernel_tasklist": 8,
-                "flex_attention_backward_dkdv_kernel": 8,
-                "flex_attention_backward_dq_kernel": 6,
-                "flex_attention_kernel":4,
-            }
-            _, q_head, _,head_dim,= q.shape
-            _, kv_head, _, _,= k.shape
-            effective_qk_flops = q_head * n_element * head_dim
-
-            print(f"\n{'='*70}")
-            print(f"[Tasklist Perf] Hq={q_head}, Hkv={kv_head}, SEQ_LEN={q.shape}")
-            print(f"[Tasklist Perf] D={head_dim}, Peak={peak_tflops} TFLOPs")
-            print(f"{'='*70}")
-
-            for kernel_name, num_n_element in num_n_elements.items():
-                if kernel_name not in kernel_times:
-                    print(f"[Tasklist Perf] {kernel_name}: not found in op_statistic.csv")
-                    continue
-                avg_time_us = kernel_times[kernel_name]
-                duration_s = avg_time_us / 1e6
-                effective_flops = effective_qk_flops * num_n_element
-                total_flops_t = effective_flops / 1e12
-                mfu = total_flops_t / duration_s / peak_tflops
-                print(
-                    f"[Tasklist Perf] {kernel_name}: "
-                    f"Avg Time={avg_time_us:.2f} us, "
-                    f"num_n_element={num_n_element}, "
-                    f"FLOPs={total_flops_t:.4f} T, "
-                    f"MFU={mfu:.4f} ({mfu*100:.2f}%)"
-                )
-            print(f"{'='*70}\n")
-        else:
-            print(f"[Tasklist Perf] op_statistic.csv not found at: {csv_file_path}")
-    else:
-        print(f"[Tasklist Perf] Profiling directory not found: {prof_dir}")
-    del out, mask
-    torch.npu.empty_cache()
-    return {"mask_mem_mb": mask_mem, "mask_peak_mb": mask_peak,
-            "fwd_mem_mb": fwd_mem, "bwd_mem_mb": bwd_mem,
-            "peak_mem_mb": peak_mem}
+    def mask_mod(b, h, q_idx, kv_idx):
+        same_doc = segment_ids[q_idx] == segment_ids[kv_idx]
+        causal = q_idx >= kv_idx
+        window = causal & ((q_idx - kv_idx) <= W)
+        glob = causal & (kv_idx >= doc_start[q_idx]) & (kv_idx < doc_start[q_idx] + G)
+        sparse = same_doc & (window | glob)
+        is_img = modality[q_idx] > 0
+        same_img = is_img & (modality[q_idx] == modality[kv_idx])
+        return sparse | same_img
+    return mask_mod
 
 
-def _perf_flex_attention(mask_func, problem=None):
-    SEQ_LEN = problem["total_s"]
+def _stair_mask_mod(problem):
+    video_ids = problem["video_ids"]
+    frame_ids = problem["frame_ids"]
+
+    def mask_mod(b, h, q_idx, kv_idx):
+        same_doc = video_ids[q_idx] == video_ids[kv_idx]
+        frame_causal = frame_ids[q_idx] >= frame_ids[kv_idx]
+        return same_doc & frame_causal
+    return mask_mod
+
+def _video_stair_mask_mod(problem):
+    video_ids = problem["video_ids"]
+    frame_ids = problem["frame_ids"]
+
+    def mask_mod(b, h, q_idx, kv_idx):
+        same_video = video_ids[q_idx] == video_ids[kv_idx]
+        same_frame = frame_ids[q_idx] == frame_ids[kv_idx]
+        prev_frame = frame_ids[q_idx] > frame_ids[kv_idx]
+        return same_video & (same_frame | prev_frame)
+    return mask_mod
+
+def _cross_sample_causal_video_bidir_mask_mod(problem):
+    modality = problem["modality"]
+
+    def mask_mod(b, h, q_idx, kv_idx):
+        causal = q_idx >= kv_idx
+        is_video = modality[q_idx] > 0
+        same_video = is_video & (modality[q_idx] == modality[kv_idx])
+        return causal | same_video
+    return mask_mod
+
+def _full_mask_mod(problem):
+    document_ids = problem["segment_ids"]
+    modality = problem["modality"]
+
+    def mask_mod(b, h, q_idx, kv_idx):
+        same_doc = document_ids[q_idx] == document_ids[kv_idx]
+        causal = q_idx >= kv_idx
+        samedoc_causal = same_doc & causal
+        is_img = modality[q_idx] > 0
+        same_img = is_img & (modality[q_idx] == modality[kv_idx])
+        return samedoc_causal | same_img
+    return mask_mod
+
+_MASK_FUNCS = [
+    ("sparse", _sparse_mask_mod),
+    ("full", _full_mask_mod),
+    ("stair", _stair_mask_mod),
+    ("video_stair", _video_stair_mask_mod),
+    ("cross_sample_causal_video_bidir", _cross_sample_causal_video_bidir_mask_mod),
+]
+
+_MASK_FUNC_TO_TYPE = {id(fn): name for name, fn in _MASK_FUNCS}
+
+def _build_dense_mask(mask_func, problem):
     mask_type_str = _MASK_FUNC_TO_TYPE[id(mask_func)]
+    return triton_create_mask(problem, mask_type_str, tile_size=MASK_BLOCK_SIZE)
 
-    prof_dir_root = os.path.join("./npu_profilling", mask_type_str)
-    os.makedirs(prof_dir_root, exist_ok=True)
-
-    results = {}
-
-    # mojo_packed: streaming stripe build (no full dense_mask materialized)
-    gc.collect()
-    torch.npu.empty_cache()
-    if SEQ_LEN <= MAX_DENSE_SEQ:
-        dense_mask = _build_dense_mask(mask_func, problem)
-        _sync()
-        n_element = dense_mask.to("cpu").sum().item()
+# ============================================================================
+# Attention wrappers
+# ============================================================================
+def _flex_attention_mojo(q, k, v, mask, block_mask, dropout_rate=0.0, input_format=None):
+    if input_format == "head-first":
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+    if mask is not None:
+        block_mask.dense_mask = mask
+    if USE_MOJO_FLEX_ATTENTION:
+        output = mojo_flex_attention(q, k, v, block_mask=block_mask)
     else:
-        # 大序列：分块统计激活元素，避免物化 [S,S] 稠密 mask 导致 OOM
-        n_element = _count_n_element(mask_func, problem)
-    print(">>>>>>>>>>>>>>>>>>>>>>>>>>>dense_mask.sum().item() in perf", n_element)
-    results["mojo_packed"] = _perf_benchmark(
-        "mojo_packed",
-        lambda: _build_block_mask(mask_func,problem),
-        lambda q, k, v, bm: _flex_attention_mojo(q, k, v, None, bm, 0.0, None),
-        problem["q"], problem["k"], problem["v"],
-        prof_dir_root,
-        mask_func,
-        n_element,
-    )
+        try:
+            import torch_npu  
+            import torch_npu._inductor  # noqa: F401
+        except ImportError as e:
+            print(f"import torch_npu._inductor {e}")
+            pass
+        flex_compiled = torch.compile(flex_attention, backend="inductor")
+        output = flex_compiled(q, k, v, block_mask=block_mask,
+                               enable_gqa=True, return_lse=False)                            
+    return output.transpose(1, 2)
 
-    # ascendc: torch SDPA + dense_mask（仅小序列，大序列避免物化稠密 mask）
-    gc.collect()
-    torch.npu.empty_cache()
+def _build_block_mask(mask_func, problem):
+    SEQ_LEN = problem["total_s"]
+    device=problem["q"].device
+    if GEN_MASK_TRITON:
+        classify_strategy= "fused" if not is_910() else "decoupled"
+        mask_type_str = _MASK_FUNC_TO_TYPE[id(mask_func)]
+        packed_block_mask = _build_packed_block_mask_streaming(mask_type_str, problem, SEQ_LEN, Q_BLOCK_SIZE, KV_BLOCK_SIZE, classify_strategy=classify_strategy)
+    else:
+        if USE_MOJO_FLEX_ATTENTION:
+            packed_block_mask = create_block_mask_patched(
+                mask_func(problem), B=1, H=1, Q_LEN=SEQ_LEN, KV_LEN=SEQ_LEN,
+                device=device, BLOCK_SIZE=(Q_BLOCK_SIZE, KV_BLOCK_SIZE),
+            )
+        else:
+            packed_block_mask = create_block_mask(mask_func(problem),B=1, H=1, Q_LEN=SEQ_LEN, 
+                KV_LEN=SEQ_LEN,device=device, BLOCK_SIZE=(Q_BLOCK_SIZE, KV_BLOCK_SIZE))
+    return packed_block_mask
 
-    if SEQ_LEN <= MAX_DENSE_SEQ:
-        results["ascendc"] = _perf_benchmark(
-            "ascendc",
-            lambda: _build_dense_mask(mask_func, problem),
-            lambda q, k, v, m: _sdpa_with_dense_mask(q, k, v, m, 0.0, None),
-            problem["q"], problem["k"], problem["v"],
-            prof_dir_root,
-            mask_func,
-            None
+def _sdpa_with_dense_mask(query_states, key_states, value_states, attention_mask, dropout_rate, input_format):
+    if input_format == "head-first":
+        query_states = query_states.transpose(1, 2)
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
+    query_states = query_states.contiguous()
+    key_states = key_states.contiguous()
+    value_states = value_states.contiguous()
+
+    mask_2d = attention_mask
+    while mask_2d.dim() > 2:
+        mask_2d = mask_2d[0]
+
+    q_len_total = query_states.size(2)
+    block_q = APPLY_Q_CHUNK if APPLY_Q_CHUNK is not None else q_len_total
+    chunks = []
+    for qs in range(0, q_len_total, block_q):
+        qe = min(qs + block_q, q_len_total)
+        row = mask_2d[qs:qe]
+        col_any = row.any(dim=0)
+        nz = col_any.nonzero(as_tuple=False)
+        if nz.numel() == 0:
+            chunks.append(query_states.new_zeros((query_states.size(0), query_states.size(1), qe - qs, query_states.size(3))))
+            continue
+        kmin = int(nz[0].item())
+        kmax = int(nz[-1].item()) + 1
+        chunks.append(
+            F.scaled_dot_product_attention(
+                query_states[:, :, qs:qe], key_states[:, :, kmin:kmax], value_states[:, :, kmin:kmax],
+                attn_mask=row[None, None, :, kmin:kmax], dropout_p=dropout_rate, enable_gqa=False,
+            )
         )
-    return results
+    return torch.cat(chunks, dim=2).transpose(1, 2).contiguous()
 
-# ============================================================================
-# 分块统计 mask 激活元素（大序列避免物化全量稠密 mask）
-# ============================================================================
+# 超过该长度时改用分块参考实现，避免物化全量稠密 mask 导致 OOM
 MAX_DENSE_SEQ = 20000
 
 
+def _sdpa_chunked_reference(q, k, v, mask_func, problem, dropout_rate=0.0, q_chunk=1024):
+    """q/k/v 为 [B, H, S, D] (head-first), 返回 [B, S, H, D]。
+
+    分块计算参考注意力，不物化 [S, S] 全量稠密 mask，因此大 seq（1M）也不会 OOM。
+    """
+    mask_mod = mask_func(problem)
+    B, H, S, D = q.shape
+    device = q.device
+    chunks = []
+    for qs in range(0, S, q_chunk):
+        qe = min(qs + q_chunk, S)
+        cb = qe - qs
+        # int32 索引可减半索引张量显存（1M 序列下 [q_chunk, S] 索引可达数 GiB）
+        q_idx = torch.arange(qs, qe, device=device, dtype=torch.int32)[:, None].expand(cb, S)
+        kv_idx = torch.arange(0, S, device=device, dtype=torch.int32)[None, :].expand(cb, S)
+        m = mask_mod(0, 0, q_idx, kv_idx)  # [cb, S] bool
+        col_any = m.any(dim=0)
+        nz = col_any.nonzero(as_tuple=False)
+        if nz.numel() == 0:
+            chunks.append(q.new_zeros((B, H, cb, D)))
+            continue
+        kmin = int(nz[0].item())
+        kmax = int(nz[-1].item()) + 1
+        attn = F.scaled_dot_product_attention(
+            q[:, :, qs:qe], k[:, :, kmin:kmax], v[:, :, kmin:kmax],
+            attn_mask=m[:, kmin:kmax][None, None, :, :],
+            dropout_p=dropout_rate, enable_gqa=False,
+        )
+        chunks.append(attn)
+    out = torch.cat(chunks, dim=2)
+    return out.transpose(1, 2).contiguous()
+
+
 def _count_n_element(mask_func, problem, q_chunk=1024):
+    """分块统计 mask 激活元素个数，避免物化全量稠密 mask。"""
     mask_mod = mask_func(problem)
     S = problem["total_s"]
     device = problem["q"].device
@@ -248,12 +242,103 @@ def _count_n_element(mask_func, problem, q_chunk=1024):
     for qs in range(0, S, q_chunk):
         qe = min(qs + q_chunk, S)
         cb = qe - qs
-        q_idx = torch.arange(qs, qe, device=device)[:, None].expand(cb, S)
-        kv_idx = torch.arange(0, S, device=device)[None, :].expand(cb, S)
+        # int32 索引可减半索引张量显存
+        q_idx = torch.arange(qs, qe, device=device, dtype=torch.int32)[:, None].expand(cb, S)
+        kv_idx = torch.arange(0, S, device=device, dtype=torch.int32)[None, :].expand(cb, S)
         m = mask_mod(0, 0, q_idx, kv_idx)
         total += int(m.sum().item())
     return total
 
+# ============================================================================
+# Data building
+# ============================================================================
+def _build_video_indicators(device,frame_lens):
+    segment_ids, doc_start, video_ids, frame_ids, modality = [], [], [], [], []
+    sample_start = 0
+    next_video_id = 0
+
+    for sample_id, sample_videos in enumerate(frame_lens):
+        for frame_lens in sample_videos:
+            cur_video_id = next_video_id
+            next_video_id += 1
+            for frame_id, frame_len in enumerate(frame_lens):
+                segment_ids.append(torch.full((frame_len,), sample_id, dtype=torch.long))
+                doc_start.append(torch.full((frame_len,), sample_start, dtype=torch.long))
+                video_ids.append(torch.full((frame_len,), cur_video_id, dtype=torch.long))
+                frame_ids.append(torch.full((frame_len,), frame_id, dtype=torch.long))
+                modality.append(torch.full((frame_len,), cur_video_id + 1, dtype=torch.long))
+        sample_start += sum(sum(fl) for fl in sample_videos)
+
+    return {
+        "segment_ids": torch.cat(segment_ids).to(device),
+        "doc_start": torch.cat(doc_start).to(device),
+        "video_ids": torch.cat(video_ids).to(device),
+        "frame_ids": torch.cat(frame_ids).to(device),
+        "modality": torch.cat(modality).to(device),
+    }
+
+def _build_modality_indicators(device, data_length=None, data_input_type=None, image_modalities=None):
+    indicator = []
+    iidx = 1
+    for sample_types, sample_lens in zip(data_input_type, data_length):
+        for sample_type, sample_len in zip(sample_types, sample_lens):
+            if sample_type in image_modalities:
+                indicator.append(torch.full((sample_len,), iidx, dtype=torch.long))
+                iidx += 1
+            else:
+                indicator.append(torch.full((sample_len,), -1, dtype=torch.long))
+    return torch.cat(indicator).to(device)
+
+def build_problem(batch_size,q_head, kv_head, head_dim, data_lens, data_types, sliding_windows, global_windows, dtype, mask_func):
+    device = _device()
+    torch.manual_seed(SEED)
+
+    num_q_heads = q_head
+    num_kv_heads = kv_head
+
+    sample_lens = [sum(s) for s in data_lens]
+    cu_seqlens = torch.tensor([0, *torch.tensor(sample_lens).cumsum(0).tolist()], dtype=torch.int32, device=device)
+    total_s = int(cu_seqlens[-1].item())
+    segment_ids = torch.repeat_interleave(
+        torch.arange(len(sample_lens), device=device, dtype=torch.int32),
+        torch.tensor(sample_lens, device=device),
+    )
+    doc_start = torch.repeat_interleave(cu_seqlens[:-1], cu_seqlens.diff()).to(torch.long)
+
+    q = torch.rand(batch_size, num_q_heads, total_s, head_dim, device=device, dtype=dtype)
+    k = torch.rand(batch_size, num_kv_heads, total_s, head_dim, device=device, dtype=dtype)
+    v = torch.rand(batch_size, num_kv_heads, total_s, head_dim, device=device, dtype=dtype)
+
+    if mask_func in [_video_stair_mask_mod, _stair_mask_mod]:
+        meta = _build_video_indicators(device,data_types)
+        return {
+            "q": q, "k": k, "v": v,
+            "segment_ids": meta["segment_ids"], "doc_start": meta["doc_start"],
+            "video_ids": meta["video_ids"], "frame_ids": meta["frame_ids"], "modality": meta["modality"],
+            "cu_seqlens": cu_seqlens, "total_s": total_s,
+            "sliding_window": sliding_windows, "global_window": global_windows,
+            "num_q_heads": num_q_heads, "num_kv_heads": num_kv_heads, "head_dim": head_dim,
+        }
+    else:
+        modality = _build_modality_indicators(device=device,data_length=data_lens, 
+                                              data_input_type=data_types, image_modalities=FULL_MASK_MODALITIES,)
+        return {
+            "q": q, "k": k, "v": v,
+            "segment_ids": segment_ids.long(), "modality": modality, "doc_start": doc_start,
+            "cu_seqlens": cu_seqlens, "total_s": total_s,
+            "sliding_window": sliding_windows, "global_window": global_windows,
+            "num_q_heads": num_q_heads, "num_kv_heads": num_kv_heads, "head_dim": head_dim,
+        }
+
+
+# ============================================================================
+# Shared parametrize decorator for mask functions
+# ============================================================================
+_mask_func_param = pytest.mark.parametrize(
+    "mask_func",
+    [fn for _, fn in _MASK_FUNCS],
+    ids=[name for name, _ in _MASK_FUNCS],
+)
 
 # ============================================================================
 # 随机用例生成（固定种子保证可复现，同时保证随机性）
@@ -320,6 +405,24 @@ _RANDOM_CASES = [
 @pytest.mark.parametrize(
     "batch_size,q_head, kv_head, head_dim, data_lens, data_types, sliding_windows, global_windows, dtype, mask_func,",
     [
+        pytest.param(1, 16, 8, 128, [[2000, 22000, 2000], [2000, 22000, 2000]],[["text", "image_gen", "text"], 
+            ["text", "image_gen", "text"]], 1024, 4, torch.bfloat16, _sparse_mask_mod,id="sparse_2000_22000"), 
+
+        pytest.param(1, 16, 8, 128, [[2000, 22000, 2000], [2000, 22000, 2000]],[["text", "image_gen", "text"], 
+                    ["text", "image_gen", "text"]], 1024, 4, torch.bfloat16, _full_mask_mod,id="full_2000_22000"), 
+
+        pytest.param(1, 16, 8, 128, [[2000, 22000, 2000], [2000, 22000, 2000]],[["text", "image_gen", "text"], 
+                            ["text", "image_gen", "text"]], 1024, 4, torch.bfloat16, _cross_sample_causal_video_bidir_mask_mod,id="cross_2000_22000"), 
+
+        pytest.param(1, 16, 8, 128, [[6500, 6500, 6500, 6500], [6500, 6500, 6500, 6500]],[
+                        [[3000, 2000, 1500], [4000, 2500], [1500, 1500, 1500, 2000], [6500]],
+                        [[3500, 3000], [1000, 2000, 1500, 2000], [2000, 2500, 2000], [6500]],]
+                    , 1024, 4, torch.bfloat16, _video_stair_mask_mod,id="video_stair_6500"), 
+
+        pytest.param(1, 16, 8, 128, [[6500, 6500, 6500, 6500], [6500, 6500, 6500, 6500]],[
+                        [[3000, 2000, 1500], [4000, 2500], [1500, 1500, 1500, 2000], [6500]],
+                        [[3500, 3000], [1000, 2000, 1500, 2000], [2000, 2500, 2000], [6500]],], 1024, 4, torch.bfloat16, _stair_mask_mod,id="stair_6500"), 
+        
         # ===== sparse（文本/图像混合，seq 1k ~ 1M，非 10 整数倍） =====
         pytest.param(1, 16, 8, 128, [[123, 4567, 89]], [["text", "image_gen", "text"]],
                      512, 4, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s5k"),
@@ -328,7 +431,7 @@ _RANDOM_CASES = [
         pytest.param(1, 32, 16, 128, [[12345, 23456, 34567]], [["text", "image_gen", "text"]],
                      4096, 8, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s70k"),
         pytest.param(1, 4, 2, 64, [[333333, 333333, 333334]], [["text", "image_gen", "text"]],
-                     65536, 16, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s1M"),
+                         65536, 16, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s1M"),
 
         # ===== full =====
         pytest.param(2, 16, 8, 128, [[1233, 4567], [891, 2345]], [["text", "image_gen"], ["text", "image_gen"]],
@@ -359,15 +462,80 @@ _RANDOM_CASES = [
     ] + _RANDOM_CASES
 )
 @pytest.mark.skipif(get_platform() != "npu", reason="FlexAttention TTX backend requires NPU")
-@auto_switch_platform(set_perf=True)
 @bypass_not_implemented
-def test_flex_attention_perf(batch_size,q_head, kv_head, head_dim, data_lens, data_types, sliding_windows, global_windows, dtype, mask_func,):
-    problem = build_problem(batch_size,q_head, kv_head, head_dim, data_lens, data_types, sliding_windows, global_windows, dtype, mask_func,)
-    results = _perf_flex_attention(mask_func, problem)
-    print(f"\n{'=' * 60}")
-    print(f"Performance results for {_MASK_FUNC_TO_TYPE[id(mask_func)]}:")
-    for label, r in results.items():
-        print(f"  [{label}] mask: {r['mask_mem_mb']:.1f}MB(peak:{r['mask_peak_mb']:.1f}MB), "
-              f"fwd_mem: {r['fwd_mem_mb']:.1f}MB, bwd_mem: {r['bwd_mem_mb']:.1f}MB, "
-              f"peak: {r['peak_mem_mb']:.1f}MB")
-    print(f"{'=' * 60}")
+def test_flex_attention(batch_size,q_head, kv_head, head_dim, data_lens, data_types, sliding_windows, global_windows, dtype, mask_func):
+    problem = build_problem(batch_size,q_head, kv_head, head_dim, data_lens, data_types, sliding_windows, global_windows, dtype, mask_func)
+
+    # 复用 base 张量作为参考输入，避免每个 q/k/v 各保留 3 份拷贝。
+    # 1M/16 头/128 维下每份约 4GiB，3 份共 36GiB，是 60GiB 卡 OOM 的主因。
+    q_base = problem["q"]
+    k_base = problem["k"]
+    v_base = problem["v"]
+
+    q_mojo = q_base.detach().clone().requires_grad_(True)
+    k_mojo = k_base.detach().clone().requires_grad_(True)
+    v_mojo = v_base.detach().clone().requires_grad_(True)
+
+    q_ref = q_base.requires_grad_(True)
+    k_ref = k_base.requires_grad_(True)
+    v_ref = v_base.requires_grad_(True)
+
+    SEQ_LEN = problem["total_s"]
+
+    packed_block_mask = _build_block_mask(mask_func, problem)
+                                                  
+    _sync()
+
+    return_grid = torch.tensor(SEQ_LEN, dtype=dtype, device=torch.device(_device()))
+
+    mojo_output = _flex_attention_mojo(q_mojo, k_mojo, v_mojo, None, packed_block_mask, 0.0, None)
+    _sync()
+
+    # 前向结束后释放 block mask 并清空缓存，为大序列参考路径腾出显存
+    del packed_block_mask
+    gc.collect()
+    torch.npu.empty_cache()
+
+    if SEQ_LEN <= MAX_DENSE_SEQ:
+        # 小序列：走全量稠密 mask 参考路径
+        dense_mask = _build_dense_mask(mask_func, problem)
+        _sync()
+        print(">>>>>>>>>>>>>>>>>>>>>>>>>>>dense_mask.sum().item()", dense_mask.to("cpu").sum().item())
+        ref_output = _sdpa_with_dense_mask(q_ref, k_ref, v_ref, dense_mask, 0.0, None)
+    else:
+        # 大序列：用分块参考，避免物化 [S,S] 稠密 mask 导致 OOM
+        #n_element = _count_n_element(mask_func, problem)
+        #print(">>>>>>>>>>>>>>>>>>>>>>>>>>>dense_mask.sum().item() (chunked)", n_element)
+        ref_output = _sdpa_chunked_reference(q_ref, k_ref, v_ref, mask_func, problem, 0.0)
+    _sync()
+
+    assert mojo_output.shape == ref_output.shape
+    torch.testing.assert_close(mojo_output.cpu(), ref_output.cpu(), atol=5e-3, rtol=5e-3)
+    _sync()
+
+    mojo_output.float().mean().backward(return_grid)
+    _sync()
+
+    ref_output.float().mean().backward(return_grid)
+    _sync()
+
+    torch.testing.assert_close(q_mojo.grad.cpu(), q_ref.grad.cpu(), atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(k_mojo.grad.cpu(), k_ref.grad.cpu(), atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(v_mojo.grad.cpu(), v_ref.grad.cpu(), atol=5e-3, rtol=5e-3)
+
+
+
+if __name__ == "__main__":
+    import sys
+
+    mask_map = dict(_MASK_FUNCS)
+    name = sys.argv[1] if len(sys.argv) > 1 else "sparse"
+    if name == "all":
+        for n, fn in _MASK_FUNCS:
+            print(f"\n{'=' * 60}")
+            print(f"Testing: {n}")
+            print(f"{'=' * 60}")
+            test_flex_attention(fn)
+    else:
+        test_flex_attention(mask_map[name])
+

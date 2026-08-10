@@ -1,0 +1,14 @@
+mojo_opset/tests/accuracy/functions/test_flex_attention_3.py
+  h_301d14e9f75767 6,9,13-16,26-28,30-33,35-41,44,46-115,117,119-121,123-134,136-147,149-151,153-195,197,199-200,203-204,206-229,231-233,237,245-247,252-331,335-341,408-425,466-541
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "d13f2695f02ba47b80120552963860b19f03e28b",
+  "prompts": {},
+  "humans": {
+    "h_301d14e9f75767": {
+      "author": "kevin-hongkai <253715840@qq.com>"
+    }
+  }
+}

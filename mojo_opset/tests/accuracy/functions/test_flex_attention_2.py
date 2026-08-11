@@ -23,6 +23,8 @@ try:
 except Exception:
     pass
 
+SKIP_LONG_SEQ=False
+
 def create_causal_mask_mod(cu_seqlens, device, causal=True):
     seg_ids = torch.repeat_interleave(torch.arange(len(cu_seqlens) - 1, device=device),
                                       cu_seqlens[1:] - cu_seqlens[:-1])
@@ -575,6 +577,9 @@ def test_flex_attention_2(batch_size, q_head, kv_head, head_dim, data_lens, data
     v_ref = v_base.requires_grad_(True)
 
     SEQ_LEN = problem["total_s"]
+    ## long seq takes too many time, 
+    if SKIP_LONG_SEQ and SEQ_LEN > 100000:
+        return
 
     return_grid = torch.tensor(SEQ_LEN, dtype=dtype, device=torch.device(_device()))
 
@@ -583,17 +588,17 @@ def test_flex_attention_2(batch_size, q_head, kv_head, head_dim, data_lens, data
     torch.npu.empty_cache()
 
     # 参考计算放在 mojo 前向之前：此时尚未创建 mojo 输入和 block_mask，显存占用最低
-    if SEQ_LEN <= MAX_DENSE_SEQ:
-        # 小序列：走全量稠密 mask 参考路径
-        dense_mask = _build_dense_mask(mask_func, problem)
-        _sync()
-        print(">>>>>>>>>>>>>>>>>>>>>>>>>>>dense_mask.sum().item()", dense_mask.to("cpu").sum().item())
-        ref_output = _sdpa_with_dense_mask(q_ref, k_ref, v_ref, dense_mask, 0.0, None)
-    else:
+    # if SEQ_LEN <= MAX_DENSE_SEQ:
+    #     # 小序列：走全量稠密 mask 参考路径
+    #     dense_mask = _build_dense_mask(mask_func, problem)
+    #     _sync()
+    #     print(">>>>>>>>>>>>>>>>>>>>>>>>>>>dense_mask.sum().item()", dense_mask.to("cpu").sum().item())
+    #     ref_output = _sdpa_with_dense_mask(q_ref, k_ref, v_ref, dense_mask, 0.0, None)
+    # else:
         # 大序列：用分块参考，避免物化 [S,S] 稠密 mask 导致 OOM
-        n_element = _count_n_element(mask_func, problem)
-        print(">>>>>>>>>>>>>>>>>>>>>>>>>>>dense_mask.sum().item() (chunked)", n_element)
-        ref_output = _sdpa_chunked_reference(q_ref, k_ref, v_ref, mask_func, problem, 0.0)
+    n_element = _count_n_element(mask_func, problem)
+    print(">>>>>>>>>>>>>>>>>>>>>>>>>>>dense_mask.sum().item() (chunked)", n_element)
+    ref_output = _sdpa_chunked_reference(q_ref, k_ref, v_ref, mask_func, problem, 0.0)
     _sync()
 
     # 参考完成后创建 mojo 输入
@@ -620,21 +625,21 @@ def test_flex_attention_2(batch_size, q_head, kv_head, head_dim, data_lens, data
     mojo_output.float().mean().backward(return_grid)
     _sync()
 
-    if SEQ_LEN <= MAX_DENSE_SEQ:
-        # 小序列：参考有完整计算图，直接反向
-        ref_output.float().mean().backward(return_grid)
-        _sync()
-    else:
+    # if SEQ_LEN <= MAX_DENSE_SEQ:
+    #     # 小序列：参考有完整计算图，直接反向
+    #     ref_output.float().mean().backward(return_grid)
+    #     _sync()
+    # else:
         # 大序列：参考前向在 no_grad 下计算，通过分块重算前向+反向获取梯度
-        ref_numel = ref_output.numel()
-        grad_out = torch.full_like(ref_output, return_grid.item() / ref_numel)
-        _sync()
-        gq, gk, gv = _sdpa_chunked_reference_backward(
-            q_ref, k_ref, v_ref, mask_func, problem, grad_out)
-        q_ref.grad = gq
-        k_ref.grad = gk
-        v_ref.grad = gv
-        _sync()
+    ref_numel = ref_output.numel()
+    grad_out = torch.full_like(ref_output, return_grid.item() / ref_numel)
+    _sync()
+    gq, gk, gv = _sdpa_chunked_reference_backward(
+        q_ref, k_ref, v_ref, mask_func, problem, grad_out)
+    q_ref.grad = gq
+    k_ref.grad = gk
+    v_ref.grad = gv
+    _sync()
 
     torch.testing.assert_close(q_mojo.grad.cpu(), q_ref.grad.cpu(), atol=5e-3, rtol=5e-3)
     torch.testing.assert_close(k_mojo.grad.cpu(), k_ref.grad.cpu(), atol=5e-3, rtol=5e-3)

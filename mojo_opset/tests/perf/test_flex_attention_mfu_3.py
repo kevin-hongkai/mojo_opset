@@ -13,7 +13,7 @@ from mojo_opset.utils.platform import get_platform
 from mojo_opset.backends.ttx.kernels.npu.utils import is_910
 from mojo_opset.backends.ttx.kernels.npu.flex_attention import _build_packed_block_mask_streaming
 from mojo_opset.backends.ttx.kernels.npu.flex_attention import create_block_mask_patched
-from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _sync
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import USE_MOJO_FLEX_ATTENTION,_sync
 from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _device
 from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _MASK_FUNC_TO_TYPE,GEN_MASK_TRITON
 from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import Q_BLOCK_SIZE, KV_BLOCK_SIZE
@@ -122,6 +122,20 @@ def _perf_benchmark(label, build_mask_fn, fwd_fn, q, k, v, prof_dir_root, mask_f
             time.sleep(0.5)
     print(f"======================== prof end ({label}) ====================")
     if n_element is not None and os.path.exists(prof_dir):
+        if USE_MOJO_FLEX_ATTENTION:
+            num_n_elements = {
+                                "flex_attention_backward_dkdv_kernel_tasklist": 8,
+                                "flex_attention_backward_dkdv_kernel": 8,
+                                "flex_attention_backward_dq_kernel": 6,
+                                "flex_attention_kernel":4,
+                        }
+        else:
+            num_n_elements = {
+                                "triton_flex_attention_bwd_dkdv_tasklist": 8,
+                                "triton_flex_attention_bwd_dkdv_mask_out": 8,
+                                "triton_flex_attention_bwd_dq_mask_out": 6,
+                                "triton_flex_attention_fwd_mask_out":4,
+                                    }
         kernel_profiling_path = max(
             [
                 os.path.join(prof_dir, d)
@@ -138,12 +152,7 @@ def _perf_benchmark(label, build_mask_fn, fwd_fn, q, k, v, prof_dir_root, mask_f
                 reader = csv.DictReader(f)
                 for row in reader:
                     kernel_name = row["OP Type"]
-                    for target in [
-                        "flex_attention_backward_dkdv_kernel_tasklist",
-                        "flex_attention_backward_dkdv_kernel",
-                        "flex_attention_backward_dq_kernel",
-                        "flex_attention_kernel",
-                    ]:
+                    for target,_ in num_n_elements.items():
                         if target in kernel_name:
                             kernel_times[target] = float(row["Avg Time(us)"])
                             break
@@ -151,12 +160,7 @@ def _perf_benchmark(label, build_mask_fn, fwd_fn, q, k, v, prof_dir_root, mask_f
             active_steps = 5
             peak_tflops = 378.0
 
-            num_n_elements = {
-                "flex_attention_backward_dkdv_kernel_tasklist": 8,
-                "flex_attention_backward_dkdv_kernel": 8,
-                "flex_attention_backward_dq_kernel": 6,
-                "flex_attention_kernel":4,
-            }
+            
             _, q_head, _,head_dim,= q.shape
             _, kv_head, _, _,= k.shape
             effective_qk_flops = q_head * n_element * head_dim

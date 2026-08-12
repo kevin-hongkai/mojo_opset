@@ -1,0 +1,47 @@
+mojo_opset/tests/accuracy/functions/test_flex_attention_3.py
+  h_301d14e9f75767 661-662,685,765-767
+  s_2c269b81b45a49::t_beeb5c4ba3031f 670-676,680,683-684,686
+  s_2c269b81b45a49::t_ee22e4df1b4d45 626-660,663-666
+  s_2c269b81b45a49::t_0e85242e7a262f 508-623
+  s_2c269b81b45a49::t_340675eb355601 667-669
+mojo_opset/tests/perf/test_flex_attention_mfu_3.py
+  s_2c269b81b45a49::t_5589c5788d583d 285-287
+  s_2c269b81b45a49::t_fc49806d038d71 280
+  s_2c269b81b45a49::t_c6bd55008724cc 26,28
+  h_301d14e9f75767 281
+  s_2c269b81b45a49::t_d22992005fc7f1 25,27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "4b4cd2a7c1d405c0a8ece4d018ce68ffc773b0c4",
+  "prompts": {},
+  "humans": {
+    "h_301d14e9f75767": {
+      "author": "kevin-hongkai <253715840@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_2c269b81b45a49": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a6af329b7025efc78cfe547",
+        "model": "glm-5.2"
+      },
+      "human_author": "kevin-hongkai <253715840@qq.com>",
+      "custom_attributes": {
+        "source_scene": "agent",
+        "dedupe_key": "6a6af329b7025efc78cfe547:6a7c166c9b83939d09fbe32f:afterEdit:4ed2d06f",
+        "tool_id": "icube:applyChatSnapshotPatch",
+        "edit_kind": "file_edit",
+        "tool_type": "builtin",
+        "client_type": "ide",
+        "external_session_id": "6a6af329b7025efc78cfe547",
+        "tool_use_id": "6a7c166c9b83939d09fbe32f",
+        "runtime_client": "trae-tob-git-ai",
+        "session_id": "6a6af329b7025efc78cfe547",
+        "operation_id": "6a7c166c9b83939d09fbe32f"
+      }
+    }
+  }
+}

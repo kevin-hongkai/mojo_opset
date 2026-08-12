@@ -22,6 +22,10 @@ from mojo_opset.tests.accuracy.functions.test_flex_attention import _flex_attent
 from mojo_opset.tests.accuracy.functions.test_flex_attention import _sparse_mask_mod ,_full_mask_mod
 from mojo_opset.tests.accuracy.functions.test_flex_attention import _cross_sample_causal_video_bidir_mask_mod
 from mojo_opset.tests.accuracy.functions.test_flex_attention import _video_stair_mask_mod ,_stair_mask_mod ,build_problem
+# 复用 test_flex_attention_3 中的随机/多样本/混合段数/共用固定用例，避免重复定义
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import (
+    _RANDOM_CASES, _MULTI_SAMPLE_CASES, _MIXED_SEG_CASES, _COMMON_FIXED_CASES,
+)
 
 
 # NPU device validation monkey-patch (same as original test)
@@ -273,108 +277,14 @@ def _count_n_element(mask_func, problem, q_chunk=512):
     return total
 
 
-# ============================================================================
-# 随机用例生成（固定种子保证可复现，同时保证随机性）
-# ============================================================================
-import random as _random
+import random as _random  
 
-_RNG = _random.Random(2026)
-_RAND_BATCH = [1, 2]
-_RAND_QHEAD = [16, 32]
-_RAND_HDIM = [64, 128]
-_RAND_DTYPES = [torch.bfloat16]
-_RAND_MAG = [5000, 60000, 300000, 1000000]
-_RAND_SLIDE = [512, 1024, 4096, 65536]
-_RAND_GLOBAL = [4, 8, 16]
-_RAND_TEXT_MASKS = [_sparse_mask_mod, _full_mask_mod, _cross_sample_causal_video_bidir_mask_mod]
-
-
-def _random_positive_split(rng, total, k):
-    """把 total 拆成 k 个正整数（任意数值，非 10 整数倍）。"""
-    if k == 1:
-        return [total]
-    points = sorted(rng.sample(range(1, total), k - 1))
-    parts = [points[0]]
-    for i in range(1, k - 1):
-        parts.append(points[i] - points[i - 1])
-    parts.append(total - points[-1])
-    return parts
-
-
-def _make_random_case(rng):
-    batch = rng.choice(_RAND_BATCH)
-    mag = rng.choice(_RAND_MAG)
-    # 大序列（300k/1M）用较小的 head/dim，避免 q/k/v 与参考比对在 60GiB 卡上显存溢出
-    if mag >= 300000:
-        q_head = rng.choice([4, 8])
-        hdim = 64
-    else:
-        q_head = rng.choice(_RAND_QHEAD)
-        hdim = rng.choice(_RAND_HDIM)
-    kv_head = rng.choice([h for h in [2, 4, 8, 16] if h <= q_head])
-    n_samples = rng.randint(1, 3)
-    weights = [rng.random() for _ in range(n_samples)]
-    wsum = sum(weights) or 1.0
-    sample_totals = [max(int(mag * w / wsum), 2) for w in weights]
-    data_lens, data_types = [], []
-    for st in sample_totals:
-        n_seg = rng.randint(1, 4)
-        segs = _random_positive_split(rng, st, n_seg)
-        types = [rng.choice(["text", "image_gen"]) for _ in range(n_seg)]
-        data_lens.append(segs)
-        data_types.append(types)
-    sliding = rng.choice(_RAND_SLIDE)
-    global_w = rng.choice(_RAND_GLOBAL)
-    dtype = rng.choice(_RAND_DTYPES)
-    mask = rng.choice(_RAND_TEXT_MASKS)
-    return batch, q_head, kv_head, hdim, data_lens, data_types, sliding, global_w, dtype, mask
-
-
-_RANDOM_CASES = [
-    pytest.param(*_make_random_case(_RNG), id=f"rand_{i:02d}")
-    for i in range(10)
-]
 
 @pytest.mark.parametrize(
     "batch_size,q_head, kv_head, head_dim, data_lens, data_types, sliding_windows, global_windows, dtype, mask_func,",
-    [
-        # ===== sparse（文本/图像混合，seq 1k ~ 1M，非 10 整数倍） =====
-        pytest.param(1, 16, 8, 128, [[123, 4567, 89]], [["text", "image_gen", "text"]],
-                     512, 4, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s5k"),
-        pytest.param(2, 16, 8, 128, [[1233, 4567], [891, 2345]], [["text", "image_gen"], ["text", "image_gen"]],
-                     1024, 4, torch.bfloat16, _sparse_mask_mod, id="sparse_b2_s9k"),
-        pytest.param(1, 32, 16, 128, [[12345, 23456, 34567]], [["text", "image_gen", "text"]],
-                     4096, 8, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s70k"),
-        pytest.param(1, 16, 8, 128, [[333333, 333333, 333334]], [["text", "image_gen", "text"]],
-                     65536, 16, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s1M"),
-
-        # ===== full =====
-        pytest.param(2, 16, 8, 128, [[1233, 4567], [891, 2345]], [["text", "image_gen"], ["text", "image_gen"]],
-                     1024, 4, torch.bfloat16, _full_mask_mod, id="full_b2_s9k"),
-        pytest.param(1, 32, 16, 128, [[45678, 98765, 56789]], [["text", "image_gen", "text"]],
-                     65536, 16, torch.bfloat16, _full_mask_mod, id="full_b1_s201k"),
-
-        # ===== cross_sample_causal_video_bidir =====
-        pytest.param(1, 16, 8, 128, [[10007, 20003]], [["text", "image_gen"]],
-                     1024, 4, torch.bfloat16, _cross_sample_causal_video_bidir_mask_mod, id="cross_b1_s30k"),
-        pytest.param(2, 16, 8, 64, [[2345, 6789], [1111, 2222]], [["text", "image_gen"], ["text", "image_gen"]],
-                     2048, 8, torch.bfloat16, _cross_sample_causal_video_bidir_mask_mod, id="cross_b2_d64_s12k"),
-
-        # ===== video_stair（帧长度拆分为任意数值，非 10 整数倍） =====
-        pytest.param(1, 16, 8, 128, [[1234, 2345]], [[[600, 634], [1234, 1111]]],
-                     1024, 4, torch.bfloat16, _video_stair_mask_mod, id="video_stair_s3579"),
-        pytest.param(1, 32, 16, 128, [[12345, 23456, 34567]], [
-                        [[1234, 2266, 8845], [3456, 7890, 12110], [5678, 9123, 19766]],
-                    ], 4096, 8, torch.bfloat16, _video_stair_mask_mod, id="video_stair_s70368"),
-
-        # ===== stair =====
-        pytest.param(1, 16, 8, 128, [[3500, 4100]], [[[1234, 2266], [987, 3113]]],
-                     1024, 4, torch.bfloat16, _stair_mask_mod, id="stair_s7600"),
-        pytest.param(2, 16, 8, 64, [[12345, 23456], [34567, 45678]], [
-                        [[6000, 6345], [11111, 12345]],
-                        [[11111, 23456], [22222, 23456]],
-                    ], 2048, 8, torch.bfloat16, _stair_mask_mod, id="stair_b2_s116046"),
-    ] + _RANDOM_CASES
+    # 共用固定用例前 3 个（sparse 5k/9k/70k）
+     _COMMON_FIXED_CASES + _RANDOM_CASES
+     + _MIXED_SEG_CASES + _MULTI_SAMPLE_CASES
 )
 @pytest.mark.skipif(get_platform() != "npu", reason="FlexAttention TTX backend requires NPU")
 @auto_switch_platform(set_perf=True)

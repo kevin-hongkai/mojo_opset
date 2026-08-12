@@ -504,64 +504,186 @@ _RANDOM_CASES = [
     for i in range(10)
 ]
 
+
+# ============================================================================
+# 多样本随机用例（5-100 个样本，每个样本内段长度差异大且随机）
+# ============================================================================
+_RNG_MS = _random.Random(4242)
+# 段长度池：覆盖 10 ~ 84210，差异大，避免整齐数值
+_MS_SEG_POOL = [10, 15, 21, 33, 47, 89, 123, 256, 367, 512, 778, 1000, 1234,
+                2048, 3456, 5678, 8765, 10000, 12345, 23456, 34567, 45678,
+                56789, 67890, 73634, 84210]
+_MS_NSEG = [1, 2, 3, 4]  # 每个样本内段数
+_MS_BATCH = [1, 2]
+_MS_QHEAD = [16, 32]
+_MS_HDIM = [64, 128]
+_MS_SLIDE = [512, 1024, 4096]
+_MS_GLOBAL = [4, 8, 16]
+_MS_DTYPES = [torch.bfloat16, torch.float16]
+_MS_MASKS = [_sparse_mask_mod, _full_mask_mod, _cross_sample_causal_video_bidir_mask_mod]
+
+
+def _make_multi_sample_case(rng):
+    """生成 5-100 个样本的随机用例，每个样本内段长度从大池中随机选取，差异大。
+
+    总序列长度控制在 ~200k 以内，避免大样本数 × 大段长度导致 OOM。
+    """
+    batch = rng.choice(_MS_BATCH)
+    q_head = rng.choice(_MS_QHEAD)
+    hdim = rng.choice(_MS_HDIM)
+    kv_head = rng.choice([h for h in [2, 4, 8, 16] if h <= q_head])
+    n_samples = rng.randint(5, 100)
+    data_lens, data_types = [], []
+    total_s = 0
+    for _ in range(n_samples):
+        n_seg = rng.choice(_MS_NSEG)
+        # 根据当前总长度自适应选择段长度池，避免总长度爆炸
+        if total_s > 150000:
+            pool = [s for s in _MS_SEG_POOL if s <= 1000]
+        elif total_s > 80000:
+            pool = [s for s in _MS_SEG_POOL if s <= 5000]
+        else:
+            pool = _MS_SEG_POOL
+        segs = sorted(rng.sample(pool, n_seg))
+        rng.shuffle(segs)
+        data_lens.append(segs)
+        types = [rng.choice(["text", "image_gen"]) for _ in range(n_seg)]
+        data_types.append(types)
+        total_s += sum(segs)
+    sliding = rng.choice(_MS_SLIDE)
+    global_w = rng.choice(_MS_GLOBAL)
+    dtype = rng.choice(_MS_DTYPES)
+    mask = rng.choice(_MS_MASKS)
+    return batch, q_head, kv_head, hdim, data_lens, data_types, sliding, global_w, dtype, mask
+
+
+_MULTI_SAMPLE_CASES = [
+    pytest.param(*_make_multi_sample_case(_RNG_MS), id=f"msample_{i:02d}")
+    for i in range(10)
+]
+
+
+# ============================================================================
+# 混合段数多样本用例（每个样本内段数差异大：2/3/4 段混合，段长度差异大）
+# ============================================================================
+_RNG_MIX = _random.Random(8888)
+_MIX_SEG_POOL = [10, 15, 21, 33, 47, 89, 123, 256, 367, 512, 778, 1000, 1234,
+                 2048, 3456, 5678, 8765, 10000, 12345, 23456, 34567, 45678,
+                 56789, 67890, 73634, 84210]
+_MIX_BATCH = [1, 2]
+_MIX_QHEAD = [16, 32]
+_MIX_HDIM = [64, 128]
+_MIX_SLIDE = [512, 1024, 4096]
+_MIX_GLOBAL = [4, 8, 16]
+_MIX_DTYPES = [torch.bfloat16, torch.float16]
+_MIX_MASKS = [_sparse_mask_mod, _full_mask_mod, _cross_sample_causal_video_bidir_mask_mod]
+
+
+def _make_mixed_seg_case(rng):
+    """生成多样本用例，强制每个样本内段数各不相同（2/3/4 段循环混合），
+    段长度从大池随机选取差异大，样本数 5-100 随机。
+
+    例如一个用例内可能有：
+      [10, 15], [21, 33, 100], [1000, 73634, 23424, 32432], [47, 89], ...
+    """
+    batch = rng.choice(_MIX_BATCH)
+    q_head = rng.choice(_MIX_QHEAD)
+    hdim = rng.choice(_MIX_HDIM)
+    kv_head = rng.choice([h for h in [2, 4, 8, 16] if h <= q_head])
+    n_samples = rng.randint(5, 100)
+    # 段数模式循环：2,3,4,2,3,4,... 保证段数多样性
+    seg_pattern = [2, 3, 4]
+    data_lens, data_types = [], []
+    total_s = 0
+    for i in range(n_samples):
+        n_seg = seg_pattern[i % len(seg_pattern)]
+        # 根据当前总长度自适应选择段长度池
+        if total_s > 150000:
+            pool = [s for s in _MIX_SEG_POOL if s <= 1000]
+        elif total_s > 80000:
+            pool = [s for s in _MIX_SEG_POOL if s <= 5000]
+        else:
+            pool = _MIX_SEG_POOL
+        segs = sorted(rng.sample(pool, n_seg))
+        rng.shuffle(segs)
+        data_lens.append(segs)
+        types = [rng.choice(["text", "image_gen"]) for _ in range(n_seg)]
+        data_types.append(types)
+        total_s += sum(segs)
+    sliding = rng.choice(_MIX_SLIDE)
+    global_w = rng.choice(_MIX_GLOBAL)
+    dtype = rng.choice(_MIX_DTYPES)
+    mask = rng.choice(_MIX_MASKS)
+    return batch, q_head, kv_head, hdim, data_lens, data_types, sliding, global_w, dtype, mask
+
+
+_MIXED_SEG_CASES = [
+    pytest.param(*_make_mixed_seg_case(_RNG_MIX), id=f"mixseg_{i:02d}")
+    for i in range(10)
+]
+
+
+# ============================================================================
+# 共用固定用例（test_flex_attention_3 与 test_flex_attention_mfu_3 共享）
+# 注意：sparse_b1_s1M 因精度/性能需求不同，各自单独定义
+# ============================================================================
+_COMMON_FIXED_CASES = [
+    # ===== sparse（前 3 个，sparse_b1_s1M 由各文件单独定义） =====
+    pytest.param(1, 16, 8, 128, [[123, 4567, 89]], [["text", "image_gen", "text"]],
+                 512, 4, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s5k"),
+    pytest.param(2, 16, 8, 128, [[1233, 4567], [891, 2345]], [["text", "image_gen"], ["text", "image_gen"]],
+                 1024, 4, torch.bfloat16, _sparse_mask_mod, id="sparse_b2_s9k"),
+    pytest.param(1, 32, 16, 128, [[12345, 23456, 34567]], [["text", "image_gen", "text"]],
+                 4096, 8, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s70k"),
+    # ===== full =====
+    pytest.param(2, 16, 8, 128, [[1233, 4567], [891, 2345]], [["text", "image_gen"], ["text", "image_gen"]],
+                 1024, 4, torch.bfloat16, _full_mask_mod, id="full_b2_s9k"),
+    pytest.param(1, 32, 16, 128, [[45678, 98765, 56789]], [["text", "image_gen", "text"]],
+                 65536, 16, torch.bfloat16, _full_mask_mod, id="full_b1_s201k"),
+    # ===== cross_sample_causal_video_bidir =====
+    pytest.param(1, 16, 8, 128, [[10007, 20003]], [["text", "image_gen"]],
+                 1024, 4, torch.bfloat16, _cross_sample_causal_video_bidir_mask_mod, id="cross_b1_s30k"),
+    pytest.param(2, 16, 8, 64, [[2345, 6789], [1111, 2222]], [["text", "image_gen"], ["text", "image_gen"]],
+                 2048, 8, torch.bfloat16, _cross_sample_causal_video_bidir_mask_mod, id="cross_b2_d64_s12k"),
+    # ===== video_stair（帧长度拆分为任意数值，非 10 整数倍） =====
+    pytest.param(1, 16, 8, 128, [[1234, 2345]], [[[600, 634], [1234, 1111]]],
+                 1024, 4, torch.bfloat16, _video_stair_mask_mod, id="video_stair_s3579"),
+    pytest.param(1, 32, 16, 128, [[12345, 23456, 34567]], [
+                    [[1234, 2266, 8845], [3456, 7890, 12110], [5678, 9123, 19766]],
+                ], 4096, 8, torch.bfloat16, _video_stair_mask_mod, id="video_stair_s70368"),
+    # ===== stair =====
+    pytest.param(1, 16, 8, 128, [[3500, 4100]], [[[1234, 2266], [987, 3113]]],
+                 1024, 4, torch.bfloat16, _stair_mask_mod, id="stair_s7600"),
+    pytest.param(2, 16, 8, 64, [[12345, 23456], [34567, 45678]], [
+                    [[6000, 6345], [11111, 12345]],
+                    [[11111, 23456], [22222, 23456]],
+                ], 2048, 8, torch.bfloat16, _stair_mask_mod, id="stair_b2_s116046"),
+    pytest.param(1, 16, 8, 128, [[333333, 333333, 333334]], [["text", "image_gen", "text"]],
+                         65536, 16, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s1M"),
+]
+
+
+
 @pytest.mark.parametrize(
     "batch_size,q_head, kv_head, head_dim, data_lens, data_types, sliding_windows, global_windows, dtype, mask_func,",
     [
-        pytest.param(1, 16, 8, 128, [[2000, 22000, 2000], [2000, 22000, 2000]],[["text", "image_gen", "text"], 
-            ["text", "image_gen", "text"]], 1024, 4, torch.bfloat16, _sparse_mask_mod,id="sparse_2000_22000"), 
-
-        pytest.param(1, 16, 8, 128, [[2000, 22000, 2000], [2000, 22000, 2000]],[["text", "image_gen", "text"], 
-                    ["text", "image_gen", "text"]], 1024, 4, torch.bfloat16, _full_mask_mod,id="full_2000_22000"), 
-
-        pytest.param(1, 16, 8, 128, [[2000, 22000, 2000], [2000, 22000, 2000]],[["text", "image_gen", "text"], 
-                            ["text", "image_gen", "text"]], 1024, 4, torch.bfloat16, _cross_sample_causal_video_bidir_mask_mod,id="cross_2000_22000"), 
-
+        # ===== 精度测试专属用例（mfu 不使用） =====
+        pytest.param(1, 16, 8, 128, [[2000, 22000, 2000], [2000, 22000, 2000]],[["text", "image_gen", "text"],
+            ["text", "image_gen", "text"]], 1024, 4, torch.bfloat16, _sparse_mask_mod,id="sparse_2000_22000"),
+        pytest.param(1, 16, 8, 128, [[2000, 22000, 2000], [2000, 22000, 2000]],[["text", "image_gen", "text"],
+                    ["text", "image_gen", "text"]], 1024, 4, torch.bfloat16, _full_mask_mod,id="full_2000_22000"),
+        pytest.param(1, 16, 8, 128, [[2000, 22000, 2000], [2000, 22000, 2000]],[["text", "image_gen", "text"],
+                            ["text", "image_gen", "text"]], 1024, 4, torch.bfloat16, _cross_sample_causal_video_bidir_mask_mod,id="cross_2000_22000"),
         pytest.param(1, 16, 8, 128, [[6500, 6500, 6500, 6500], [6500, 6500, 6500, 6500]],[
                         [[3000, 2000, 1500], [4000, 2500], [1500, 1500, 1500, 2000], [6500]],
                         [[3500, 3000], [1000, 2000, 1500, 2000], [2000, 2500, 2000], [6500]],]
-                    , 1024, 4, torch.bfloat16, _video_stair_mask_mod,id="video_stair_6500"), 
-
+                    , 1024, 4, torch.bfloat16, _video_stair_mask_mod,id="video_stair_6500"),
         pytest.param(1, 16, 8, 128, [[6500, 6500, 6500, 6500], [6500, 6500, 6500, 6500]],[
                         [[3000, 2000, 1500], [4000, 2500], [1500, 1500, 1500, 2000], [6500]],
-                        [[3500, 3000], [1000, 2000, 1500, 2000], [2000, 2500, 2000], [6500]],], 1024, 4, torch.bfloat16, _stair_mask_mod,id="stair_6500"), 
-        
-        # ===== sparse（文本/图像混合，seq 1k ~ 1M，非 10 整数倍） =====
-        pytest.param(1, 16, 8, 128, [[123, 4567, 89]], [["text", "image_gen", "text"]],
-                     512, 4, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s5k"),
-        pytest.param(2, 16, 8, 128, [[1233, 4567], [891, 2345]], [["text", "image_gen"], ["text", "image_gen"]],
-                     1024, 4, torch.bfloat16, _sparse_mask_mod, id="sparse_b2_s9k"),
-        pytest.param(1, 32, 16, 128, [[12345, 23456, 34567]], [["text", "image_gen", "text"]],
-                     4096, 8, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s70k"),
-        pytest.param(1, 4, 2, 64, [[333333, 333333, 333334]], [["text", "image_gen", "text"]],
-                         65536, 16, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s1M"),
-
-        # ===== full =====
-        pytest.param(2, 16, 8, 128, [[1233, 4567], [891, 2345]], [["text", "image_gen"], ["text", "image_gen"]],
-                     1024, 4, torch.bfloat16, _full_mask_mod, id="full_b2_s9k"),
-        pytest.param(1, 32, 16, 128, [[45678, 98765, 56789]], [["text", "image_gen", "text"]],
-                     65536, 16, torch.bfloat16, _full_mask_mod, id="full_b1_s201k"),
-
-        # ===== cross_sample_causal_video_bidir =====
-        pytest.param(1, 16, 8, 128, [[10007, 20003]], [["text", "image_gen"]],
-                     1024, 4, torch.bfloat16, _cross_sample_causal_video_bidir_mask_mod, id="cross_b1_s30k"),
-        pytest.param(2, 16, 8, 64, [[2345, 6789], [1111, 2222]], [["text", "image_gen"], ["text", "image_gen"]],
-                     2048, 8, torch.bfloat16, _cross_sample_causal_video_bidir_mask_mod, id="cross_b2_d64_s12k"),
-
-        # ===== video_stair（帧长度拆分为任意数值，非 10 整数倍） =====
-        pytest.param(1, 16, 8, 128, [[1234, 2345]], [[[600, 634], [1234, 1111]]],
-                     1024, 4, torch.bfloat16, _video_stair_mask_mod, id="video_stair_s3579"),
-        pytest.param(1, 32, 16, 128, [[12345, 23456, 34567]], [
-                        [[1234, 2266, 8845], [3456, 7890, 12110], [5678, 9123, 19766]],
-                    ], 4096, 8, torch.bfloat16, _video_stair_mask_mod, id="video_stair_s70368"),
-
-        # ===== stair =====
-        pytest.param(1, 16, 8, 128, [[3500, 4100]], [[[1234, 2266], [987, 3113]]],
-                     1024, 4, torch.bfloat16, _stair_mask_mod, id="stair_s7600"),
-        pytest.param(2, 16, 8, 64, [[12345, 23456], [34567, 45678]], [
-                        [[6000, 6345], [11111, 12345]],
-                        [[11111, 23456], [22222, 23456]],
-                    ], 2048, 8, torch.bfloat16, _stair_mask_mod, id="stair_b2_s116046"),
-    ] + _RANDOM_CASES
+                        [[3500, 3000], [1000, 2000, 1500, 2000], [2000, 2500, 2000], [6500]],], 1024, 4, torch.bfloat16, _stair_mask_mod,id="stair_6500"),
+    ]
+    +_COMMON_FIXED_CASES
+    + _RANDOM_CASES + _MIXED_SEG_CASES + _MULTI_SAMPLE_CASES
 )
 @pytest.mark.skipif(get_platform() != "npu", reason="FlexAttention TTX backend requires NPU")
 @bypass_not_implemented
@@ -640,12 +762,9 @@ def test_flex_attention(batch_size,q_head, kv_head, head_dim, data_lens, data_ty
         v_ref.grad = gv
         _sync()
 
-    # 大序列下 k/v 梯度跨多 chunk 累积（~128 次），bf16 误差叠加，需放松容差
-    grad_atol = 3e-2 if SEQ_LEN > MAX_DENSE_SEQ else 5e-3
-    grad_rtol = 3e-2 if SEQ_LEN > MAX_DENSE_SEQ else 5e-3
-    torch.testing.assert_close(q_mojo.grad.cpu(), q_ref.grad.cpu(), atol=grad_atol, rtol=grad_rtol)
-    torch.testing.assert_close(k_mojo.grad.cpu(), k_ref.grad.cpu(), atol=grad_atol, rtol=grad_rtol)
-    torch.testing.assert_close(v_mojo.grad.cpu(), v_ref.grad.cpu(), atol=grad_atol, rtol=grad_rtol)
+    torch.testing.assert_close(q_mojo.grad.cpu(), q_ref.grad.cpu(), atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(k_mojo.grad.cpu(), k_ref.grad.cpu(), atol=5e-3, rtol=5e-3)
+    torch.testing.assert_close(v_mojo.grad.cpu(), v_ref.grad.cpu(), atol=5e-3, rtol=5e-3)
 
 
 

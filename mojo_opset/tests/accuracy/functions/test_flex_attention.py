@@ -24,7 +24,7 @@ except Exception:
     pass
 
 GEN_MASK_TRITON = False
-USE_MOJO_FLEX_ATTENTION = False
+USE_MOJO_FLEX_ATTENTION = True
 FULL_MASK_MODALITIES = ("image_gen", "image_vae")
 
 SEED = 0

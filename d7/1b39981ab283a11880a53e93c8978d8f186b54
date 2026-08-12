@@ -1,0 +1,49 @@
+mojo_opset/tests/accuracy/functions/test_flex_attention_3.py
+  h_301d14e9f75767 633
+  s_2c269b81b45a49::t_cba05558cfc2cc 520-521,526,528,530-534,543,548-549
+  s_2c269b81b45a49::t_64a1ba86097cdb 527,529,538
+  s_2c269b81b45a49::t_ee10d0a54a12a5 540,542,545
+  s_2c269b81b45a49::t_5a710028ee6338 591,599,604,608,615-616,624
+  s_2c269b81b45a49::t_7f97c8490cf4d1 509,512,522,525,535-536,556
+  s_2c269b81b45a49::t_45d843ca916c30 539,541,544,547,550,553-554,568-570
+  s_2c269b81b45a49::t_2ef2f1dc51cdc2 605,614,619,623
+  s_2c269b81b45a49::t_df237321943e5a 621-622
+  s_2c269b81b45a49::t_b804bfa97ce797 546,551-552
+  s_2c269b81b45a49::t_5d94f77aa0f15f 557,563,566,571
+  s_2c269b81b45a49::t_1a44cc176b03f7 580
+  s_2c269b81b45a49::t_736f6a6f2c3a8f 555
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "d71b39981ab283a11880a53e93c8978d8f186b54",
+  "prompts": {},
+  "humans": {
+    "h_301d14e9f75767": {
+      "author": "kevin-hongkai <253715840@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_2c269b81b45a49": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a6af329b7025efc78cfe547",
+        "model": "glm-5.2"
+      },
+      "human_author": "kevin-hongkai <253715840@qq.com>",
+      "custom_attributes": {
+        "edit_kind": "file_edit",
+        "operation_id": "6a7c32369b83939d09fbe3e6",
+        "source_scene": "agent",
+        "tool_id": "icube:applyChatSnapshotPatch",
+        "external_session_id": "6a6af329b7025efc78cfe547",
+        "client_type": "ide",
+        "runtime_client": "trae-tob-git-ai",
+        "session_id": "6a6af329b7025efc78cfe547",
+        "tool_type": "builtin",
+        "dedupe_key": "6a6af329b7025efc78cfe547:6a7c32369b83939d09fbe3e6:afterEdit:31b8492c",
+        "tool_use_id": "6a7c32369b83939d09fbe3e6"
+      }
+    }
+  }
+}

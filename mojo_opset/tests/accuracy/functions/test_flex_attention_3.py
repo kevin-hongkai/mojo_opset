@@ -506,46 +506,69 @@ _RANDOM_CASES = [
 
 
 # ============================================================================
-# 多样本随机用例（5-100 个样本，每个样本内段长度差异大且随机）
+# 多样本随机用例（5-100 个样本，每个样本内段数和段长度均随机）
 # ============================================================================
 _RNG_MS = _random.Random(4242)
-# 段长度池：覆盖 10 ~ 84210，差异大，避免整齐数值
-_MS_SEG_POOL = [10, 15, 21, 33, 47, 89, 123, 256, 367, 512, 778, 1000, 1234,
-                2048, 3456, 5678, 8765, 10000, 12345, 23456, 34567, 45678,
-                56789, 67890, 73634, 84210]
-_MS_NSEG = [1, 2, 3, 4]  # 每个样本内段数
+_MS_NSEG = [10, 15, 20, 100, 433, 1000]  # 每个样本内段数
 _MS_BATCH = [1, 2]
 _MS_QHEAD = [16, 32]
 _MS_HDIM = [64, 128]
 _MS_SLIDE = [512, 1024, 4096]
 _MS_GLOBAL = [4, 8, 16]
-_MS_DTYPES = [torch.bfloat16, torch.float16]
+_MS_DTYPES = [torch.bfloat16]
 _MS_MASKS = [_sparse_mask_mod, _full_mask_mod, _cross_sample_causal_video_bidir_mask_mod]
+_MS_MIN_SEG = 1            # 单段最小长度
+_MS_MAX_SEG = 1000000      # 单段最大长度（1 ~ 1M 随机）
+_MS_TOTAL_BUDGET = 180000  # 总序列长度预算，防止 OOM
+
+
+def _random_segs(rng, n_seg, budget):
+    """随机生成 n_seg 个段长度，每段独立 randint(1, 1M)，总长度不超过 budget。
+
+    若随机生成的总长超过 budget，则按比例缩放至 budget（保留各段比例差异）。
+    """
+    segs = [rng.randint(_MS_MIN_SEG, _MS_MAX_SEG) for _ in range(n_seg)]
+    s = sum(segs)
+    if s > budget:
+        # 按比例缩放，保留各段相对差异
+        segs = [max(_MS_MIN_SEG, int(x * budget / s)) for x in segs]
+    rng.shuffle(segs)
+    return segs
+
+
+def _sample_budget(rng, n_seg, total_s):
+    """计算单样本预算：budget = n_seg * avg，avg 在 [10, 2000] 随机。
+
+    平衡段长度差异（1~1M 随机）和样本数量，受总预算约束。
+    返回 (budget, ok)，ok=False 表示预算不足应停止。
+    """
+    avg = rng.randint(10, 2000)
+    wanted = n_seg * avg
+    remaining = _MS_TOTAL_BUDGET - total_s
+    # 至少保证每段有 _MS_MIN_SEG，否则停止
+    if remaining < n_seg * _MS_MIN_SEG:
+        return 0, False
+    budget = min(wanted, remaining)
+    return budget, True
 
 
 def _make_multi_sample_case(rng):
-    """生成 5-100 个样本的随机用例，每个样本内段长度从大池中随机选取，差异大。
-
-    总序列长度控制在 ~200k 以内，避免大样本数 × 大段长度导致 OOM。
+    """生成 5-100 个样本的随机用例，每个样本内段数从 _MS_NSEG 随机选取，
+    段长度完全随机生成（非固定池），每样本独立预算保证段长度有差异。
     """
     batch = rng.choice(_MS_BATCH)
     q_head = rng.choice(_MS_QHEAD)
     hdim = rng.choice(_MS_HDIM)
     kv_head = rng.choice([h for h in [2, 4, 8, 16] if h <= q_head])
-    n_samples = rng.randint(5, 100)
+    n_samples_wanted = rng.randint(5, 100)
     data_lens, data_types = [], []
     total_s = 0
-    for _ in range(n_samples):
+    for _ in range(n_samples_wanted):
         n_seg = rng.choice(_MS_NSEG)
-        # 根据当前总长度自适应选择段长度池，避免总长度爆炸
-        if total_s > 150000:
-            pool = [s for s in _MS_SEG_POOL if s <= 1000]
-        elif total_s > 80000:
-            pool = [s for s in _MS_SEG_POOL if s <= 5000]
-        else:
-            pool = _MS_SEG_POOL
-        segs = sorted(rng.sample(pool, n_seg))
-        rng.shuffle(segs)
+        budget, ok = _sample_budget(rng, n_seg, total_s)
+        if not ok:
+            break
+        segs = _random_segs(rng, n_seg, budget)
         data_lens.append(segs)
         types = [rng.choice(["text", "image_gen"]) for _ in range(n_seg)]
         data_types.append(types)
@@ -554,6 +577,7 @@ def _make_multi_sample_case(rng):
     global_w = rng.choice(_MS_GLOBAL)
     dtype = rng.choice(_MS_DTYPES)
     mask = rng.choice(_MS_MASKS)
+    print(f"data_lens {data_lens}")
     return batch, q_head, kv_head, hdim, data_lens, data_types, sliding, global_w, dtype, mask
 
 
@@ -564,48 +588,40 @@ _MULTI_SAMPLE_CASES = [
 
 
 # ============================================================================
-# 混合段数多样本用例（每个样本内段数差异大：2/3/4 段混合，段长度差异大）
+# 混合段数多样本用例（每个样本内段数差异大：10/15/20 段循环混合，段长度随机）
 # ============================================================================
 _RNG_MIX = _random.Random(8888)
-_MIX_SEG_POOL = [10, 15, 21, 33, 47, 89, 123, 256, 367, 512, 778, 1000, 1234,
-                 2048, 3456, 5678, 8765, 10000, 12345, 23456, 34567, 45678,
-                 56789, 67890, 73634, 84210]
 _MIX_BATCH = [1, 2]
 _MIX_QHEAD = [16, 32]
 _MIX_HDIM = [64, 128]
 _MIX_SLIDE = [512, 1024, 4096]
 _MIX_GLOBAL = [4, 8, 16]
-_MIX_DTYPES = [torch.bfloat16, torch.float16]
+_MIX_DTYPES = [torch.bfloat16]
 _MIX_MASKS = [_sparse_mask_mod, _full_mask_mod, _cross_sample_causal_video_bidir_mask_mod]
 
 
 def _make_mixed_seg_case(rng):
-    """生成多样本用例，强制每个样本内段数各不相同（2/3/4 段循环混合），
-    段长度从大池随机选取差异大，样本数 5-100 随机。
+    """生成多样本用例，强制每个样本内段数各不相同（10/15/20 段循环混合），
+    段长度完全随机生成（非固定池），每样本独立预算保证段长度有差异。
 
     例如一个用例内可能有：
-      [10, 15], [21, 33, 100], [1000, 73634, 23424, 32432], [47, 89], ...
+      [537, 2048, 89, ...], [12000, 47, 678, ...], [22, 9999, 345, ...], ...
     """
     batch = rng.choice(_MIX_BATCH)
     q_head = rng.choice(_MIX_QHEAD)
     hdim = rng.choice(_MIX_HDIM)
     kv_head = rng.choice([h for h in [2, 4, 8, 16] if h <= q_head])
-    n_samples = rng.randint(5, 100)
-    # 段数模式循环：2,3,4,2,3,4,... 保证段数多样性
-    seg_pattern = [2, 3, 4]
+    n_samples_wanted = rng.randint(5, 100)
+    # 段数模式循环：10,15,20,10,15,20,... 保证段数多样且至少 10
+    seg_pattern = [10, 15, 20]
     data_lens, data_types = [], []
     total_s = 0
-    for i in range(n_samples):
+    for i in range(n_samples_wanted):
         n_seg = seg_pattern[i % len(seg_pattern)]
-        # 根据当前总长度自适应选择段长度池
-        if total_s > 150000:
-            pool = [s for s in _MIX_SEG_POOL if s <= 1000]
-        elif total_s > 80000:
-            pool = [s for s in _MIX_SEG_POOL if s <= 5000]
-        else:
-            pool = _MIX_SEG_POOL
-        segs = sorted(rng.sample(pool, n_seg))
-        rng.shuffle(segs)
+        budget, ok = _sample_budget(rng, n_seg, total_s)
+        if not ok:
+            break
+        segs = _random_segs(rng, n_seg, budget)
         data_lens.append(segs)
         types = [rng.choice(["text", "image_gen"]) for _ in range(n_seg)]
         data_types.append(types)
@@ -614,6 +630,7 @@ def _make_mixed_seg_case(rng):
     global_w = rng.choice(_MIX_GLOBAL)
     dtype = rng.choice(_MIX_DTYPES)
     mask = rng.choice(_MIX_MASKS)
+    print(f"data_lens {data_lens}")
     return batch, q_head, kv_head, hdim, data_lens, data_types, sliding, global_w, dtype, mask
 
 

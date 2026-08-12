@@ -13,15 +13,15 @@ from mojo_opset.utils.platform import get_platform
 from mojo_opset.backends.ttx.kernels.npu.utils import is_910
 from mojo_opset.backends.ttx.kernels.npu.flex_attention import _build_packed_block_mask_streaming
 from mojo_opset.backends.ttx.kernels.npu.flex_attention import create_block_mask_patched
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _sync
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _device
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _MASK_FUNC_TO_TYPE,GEN_MASK_TRITON
-from mojo_opset.tests.accuracy.functions.test_flex_attention import Q_BLOCK_SIZE, KV_BLOCK_SIZE
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _build_dense_mask,_sdpa_with_dense_mask
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _flex_attention_mojo,_build_block_mask
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _sparse_mask_mod ,_full_mask_mod
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _cross_sample_causal_video_bidir_mask_mod
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _video_stair_mask_mod ,_stair_mask_mod ,build_problem
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _sync
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _device
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _MASK_FUNC_TO_TYPE,GEN_MASK_TRITON
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import Q_BLOCK_SIZE, KV_BLOCK_SIZE
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _build_dense_mask,_sdpa_with_dense_mask
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _flex_attention_mojo,_build_block_mask
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _sparse_mask_mod ,_full_mask_mod
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _cross_sample_causal_video_bidir_mask_mod
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _video_stair_mask_mod ,_stair_mask_mod ,build_problem
 # 复用 test_flex_attention_3 中的随机/多样本/混合段数/共用固定用例，避免重复定义
 from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import (
     _RANDOM_CASES, _MULTI_SAMPLE_CASES, _MIXED_SEG_CASES, _COMMON_FIXED_CASES,

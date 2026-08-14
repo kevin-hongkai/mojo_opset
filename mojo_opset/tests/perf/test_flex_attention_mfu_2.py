@@ -150,7 +150,7 @@ def _perf_benchmark(label, build_mask_fn, fwd_fn, q, k, v, prof_dir_root, n_elem
                 reader = csv.DictReader(f)
                 for row in reader:
                     kernel_name = row["OP Type"]
-                    for target in num_n_elements.items():
+                    for target,_ in num_n_elements.items():
                         if target in kernel_name:
                             kernel_times[target] = float(row["Avg Time(us)"])
                             break

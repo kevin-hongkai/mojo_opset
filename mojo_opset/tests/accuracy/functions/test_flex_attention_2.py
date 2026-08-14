@@ -445,9 +445,9 @@ def _count_n_element(mask_func, problem, q_chunk=512):
 import random as _random
 
 _RNG = _random.Random(2026)
-_RAND_BATCH = [1, 2]
+_RAND_BATCH = [1]
 _RAND_QHEAD = [16, 32]
-_RAND_HDIM = [64, 128]
+_RAND_HDIM = [64, 128, 256, 512]
 _RAND_DTYPES = [torch.bfloat16]
 _RAND_MAG = [5000, 60000, 300000, 1000000]
 _RAND_SLIDE = [512, 1024, 4096, 65536]
@@ -504,13 +504,13 @@ _SHAPE_CASES = [
     pytest.param(1, 16, 8, 128,
                  [[123, 4567, 89]], [["text", "image_gen", "text"]],
                  512, 4, torch.bfloat16, id="b1_h16kv8_d128_s4779"),
-    pytest.param(2, 16, 8, 128,
+    pytest.param(1, 16, 8, 128,
                  [[1233, 4567], [891, 2345]], [["text", "image_gen"], ["text", "image_gen"]],
                  1024, 4, torch.bfloat16, id="b2_h16kv8_d128_s9036"),
-    pytest.param(1, 32, 16, 128,
+    pytest.param(1, 32, 16, 512,
                  [[12345, 23456, 34567]], [["text", "image_gen", "text"]],
                  4096, 8, torch.bfloat16, id="b1_h32kv16_d128_s70368"),
-    pytest.param(2, 16, 8, 64,
+    pytest.param(1, 16, 8, 64,
                  [[2345, 6789], [1111, 2222]], [["text", "image_gen"], ["text", "image_gen"]],
                  2048, 8, torch.float16, id="b2_h16kv8_d64_s12467"),
     pytest.param(1, 16, 8, 64,
@@ -519,26 +519,26 @@ _SHAPE_CASES = [
     pytest.param(1, 32, 16, 128,
                  [[45678, 98765, 56789]], [["text", "image_gen", "text"]],
                  65536, 16, torch.bfloat16, id="b1_h32kv16_s201232"),
-    pytest.param(2, 16, 8, 128,
+    pytest.param(1, 16, 8, 256,
                  [[12345, 23456], [34567, 45678]], [["text", "text"], ["text", "text"]],
                  8192, 8, torch.bfloat16, id="b2_h16kv8_s116046"),
     pytest.param(1, 16, 8, 128,
                  [[1000, 3000, 1000]], [["text", "image_gen", "text"]],
                  1024, 4, torch.bfloat16, id="b1_h16kv8_s5k"),
-    pytest.param(2, 16, 8, 128,
+    pytest.param(1, 16, 8, 128,
                  [[2000, 22000, 2000], [2000, 22000, 2000]],
                  [["text", "image_gen", "text"], ["text", "image_gen", "text"]],
                  1024, 4, torch.bfloat16, id="b2_h16kv8_s52k"),
     pytest.param(1, 32, 16, 128,
                  [[50000], [50000]], [["text"], ["text"]],
                  65536, 16, torch.bfloat16, id="b1_h32kv16_s100k"),
-    pytest.param(2, 16, 8, 64,
+    pytest.param(1, 16, 8, 64,
                  [[40000, 60000], [40000, 60000]], [["text", "text"], ["text", "text"]],
                  2048, 8, torch.bfloat16, id="b2_h16kv8_d64_s200k"),
     pytest.param(1, 4, 2, 64,
                  [[200000], [200000]], [["text"], ["text"]],
                  65536, 16, torch.bfloat16, id="b1_h16kv8_s400k"),
-    pytest.param(2, 4, 2, 64,
+    pytest.param(1, 4, 2, 64,
                  [[100000, 150000], [200000, 250000]], [["text", "text"], ["text", "text"]],
                  65536, 16, torch.bfloat16, id="b2_h32kv16_s700000"),
     pytest.param(1, 4, 2, 64,

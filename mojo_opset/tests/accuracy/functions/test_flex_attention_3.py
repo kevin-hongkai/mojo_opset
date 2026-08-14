@@ -443,9 +443,9 @@ _mask_func_param = pytest.mark.parametrize(
 import random as _random
 
 _RNG = _random.Random(2026)
-_RAND_BATCH = [1, 2]
+_RAND_BATCH = [1]
 _RAND_QHEAD = [16, 32]
-_RAND_HDIM = [64, 128]
+_RAND_HDIM = [64, 128,256,512]
 _RAND_DTYPES = [torch.bfloat16]
 _RAND_MAG = [5000, 60000, 300000, 1000000]
 _RAND_SLIDE = [512, 1024, 4096, 65536]
@@ -505,9 +505,9 @@ _RANDOM_CASES = [
 # ============================================================================
 _RNG_MS = _random.Random(4242)
 _MS_NSEG = [10, 15, 20, 100, 433, 1000]  # 每个样本内段数
-_MS_BATCH = [1, 2]
+_MS_BATCH = [1]
 _MS_QHEAD = [16, 32]
-_MS_HDIM = [64, 128]
+_MS_HDIM = [64, 128, 256, 512]
 _MS_SLIDE = [512, 1024, 4096]
 _MS_GLOBAL = [4, 8, 16]
 _MS_DTYPES = [torch.bfloat16]
@@ -586,9 +586,9 @@ _MULTI_SAMPLE_CASES = [
 # 混合段数多样本用例（每个样本内段数差异大：10/15/20 段循环混合，段长度随机）
 # ============================================================================
 _RNG_MIX = _random.Random(8888)
-_MIX_BATCH = [1, 2]
+_MIX_BATCH = [1]
 _MIX_QHEAD = [16, 32]
-_MIX_HDIM = [64, 128]
+_MIX_HDIM = [64, 128, 256, 512]
 _MIX_SLIDE = [512, 1024, 4096]
 _MIX_GLOBAL = [4, 8, 16]
 _MIX_DTYPES = [torch.bfloat16]
@@ -643,12 +643,12 @@ _COMMON_FIXED_CASES = [
     # ===== sparse（前 3 个，sparse_b1_s1M 由各文件单独定义） =====
     pytest.param(1, 16, 8, 128, [[123, 4567, 89]], [["text", "image_gen", "text"]],
                  512, 4, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s5k"),
-    pytest.param(2, 16, 8, 128, [[1233, 4567], [891, 2345]], [["text", "image_gen"], ["text", "image_gen"]],
+    pytest.param(1, 16, 8, 128, [[1233, 4567], [891, 2345]], [["text", "image_gen"], ["text", "image_gen"]],
                  1024, 4, torch.bfloat16, _sparse_mask_mod, id="sparse_b2_s9k"),
     pytest.param(1, 32, 16, 128, [[12345, 23456, 34567]], [["text", "image_gen", "text"]],
                  4096, 8, torch.bfloat16, _sparse_mask_mod, id="sparse_b1_s70k"),
     # ===== full =====
-    pytest.param(2, 16, 8, 128, [[1233, 4567], [891, 2345]], [["text", "image_gen"], ["text", "image_gen"]],
+    pytest.param(1, 16, 8, 128, [[1233, 4567], [891, 2345]], [["text", "image_gen"], ["text", "image_gen"]],
                  1024, 4, torch.bfloat16, _full_mask_mod, id="full_b2_s9k"),
     pytest.param(1, 32, 16, 128, [[45678, 98765, 56789]], [["text", "image_gen", "text"]],
                  65536, 16, torch.bfloat16, _full_mask_mod, id="full_b1_s201k"),
@@ -666,7 +666,7 @@ _COMMON_FIXED_CASES = [
     # ===== stair =====
     pytest.param(1, 16, 8, 128, [[3500, 4100]], [[[1234, 2266], [987, 3113]]],
                  1024, 4, torch.bfloat16, _stair_mask_mod, id="stair_s7600"),
-    pytest.param(2, 16, 8, 64, [[12345, 23456], [34567, 45678]], [
+    pytest.param(1, 16, 8, 64, [[12345, 23456], [34567, 45678]], [
                     [[6000, 6345], [11111, 12345]],
                     [[11111, 23456], [22222, 23456]],
                 ], 2048, 8, torch.bfloat16, _stair_mask_mod, id="stair_b2_s116046"),

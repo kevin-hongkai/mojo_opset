@@ -701,7 +701,18 @@ _COMMON_FIXED_CASES = [
 @bypass_not_implemented
 def test_flex_attention(batch_size,q_head, kv_head, head_dim, data_lens, data_types, sliding_windows, global_windows, dtype, mask_func):
     problem = build_problem(batch_size,q_head, kv_head, head_dim, data_lens, data_types, sliding_windows, global_windows, dtype, mask_func)
-
+    print(
+    f"batch_size={batch_size}, "
+    f"q_head={q_head}, "
+    f"kv_head={kv_head}, "
+    f"head_dim={head_dim}, "
+    f"data_lens={data_lens}, "
+    f"data_types={data_types}, "
+    f"sliding_windows={sliding_windows}, "
+    f"global_windows={global_windows}, "
+    f"dtype={dtype}, "
+    f"mask_func_name={mask_func.__name__}"
+)
     # 复用 base 张量作为参考输入，避免每个 q/k/v 各保留 3 份拷贝。
     # 1M/16 头/128 维下每份约 4GiB，3 份共 36GiB，是 60GiB 卡 OOM 的主因。
     q_base = problem["q"]

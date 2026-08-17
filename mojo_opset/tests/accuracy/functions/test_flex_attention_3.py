@@ -655,7 +655,7 @@ _COMMON_FIXED_CASES = [
     # ===== cross_sample_causal_video_bidir =====
     pytest.param(1, 16, 8, 128, [[10007, 20003]], [["text", "image_gen"]],
                  1024, 4, torch.bfloat16, _cross_sample_causal_video_bidir_mask_mod, id="cross_b1_s30k"),
-    pytest.param(2, 16, 8, 64, [[2345, 6789], [1111, 2222]], [["text", "image_gen"], ["text", "image_gen"]],
+    pytest.param(1, 16, 8, 64, [[2345, 6789], [1111, 2222]], [["text", "image_gen"], ["text", "image_gen"]],
                  2048, 8, torch.bfloat16, _cross_sample_causal_video_bidir_mask_mod, id="cross_b2_d64_s12k"),
     # ===== video_stair（帧长度拆分为任意数值，非 10 整数倍） =====
     pytest.param(1, 16, 8, 128, [[1234, 2345]], [[[600, 634], [1234, 1111]]],

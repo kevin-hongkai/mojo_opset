@@ -1,6 +1,7 @@
 import csv
 import gc
 import os
+import time
 
 import pytest
 import torch
@@ -12,15 +13,19 @@ from mojo_opset.utils.platform import get_platform
 from mojo_opset.backends.ttx.kernels.npu.utils import is_910
 from mojo_opset.backends.ttx.kernels.npu.flex_attention import _build_packed_block_mask_streaming
 from mojo_opset.backends.ttx.kernels.npu.flex_attention import create_block_mask_patched
-from mojo_opset.tests.accuracy.functions.test_flex_attention import USE_MOJO_FLEX_ATTENTION, _sync
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _device
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _MASK_FUNC_TO_TYPE,GEN_MASK_TRITON
-from mojo_opset.tests.accuracy.functions.test_flex_attention import Q_BLOCK_SIZE, KV_BLOCK_SIZE
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _build_dense_mask,_sdpa_with_dense_mask
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _flex_attention_mojo,_build_block_mask
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _sparse_mask_mod ,_full_mask_mod
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _cross_sample_causal_video_bidir_mask_mod
-from mojo_opset.tests.accuracy.functions.test_flex_attention import _video_stair_mask_mod ,_stair_mask_mod ,build_problem
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import USE_MOJO_FLEX_ATTENTION,_sync
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _device
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _MASK_FUNC_TO_TYPE,GEN_MASK_TRITON
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import Q_BLOCK_SIZE, KV_BLOCK_SIZE
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _build_dense_mask,_sdpa_with_dense_mask
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _flex_attention_mojo,_build_block_mask
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _sparse_mask_mod ,_full_mask_mod
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _cross_sample_causal_video_bidir_mask_mod
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import _video_stair_mask_mod ,_stair_mask_mod ,build_problem
+# 复用 test_flex_attention_3 中的随机/多样本/混合段数/共用固定用例，避免重复定义
+from mojo_opset.tests.accuracy.functions.test_flex_attention_3 import (
+    _RANDOM_CASES, _MULTI_SAMPLE_CASES, _MIXED_SEG_CASES, _COMMON_FIXED_CASES,
+)
 
 
 # NPU device validation monkey-patch (same as original test)
@@ -114,6 +119,7 @@ def _perf_benchmark(label, build_mask_fn, fwd_fn, q, k, v, prof_dir_root, mask_f
             out.float().mean().backward(return_grid)
             _sync()
             prof.step()
+            time.sleep(0.5)
     print(f"======================== prof end ({label}) ====================")
     if n_element is not None and os.path.exists(prof_dir):
         if USE_MOJO_FLEX_ATTENTION:
@@ -204,9 +210,13 @@ def _perf_flex_attention(mask_func, problem=None):
     # mojo_packed: streaming stripe build (no full dense_mask materialized)
     gc.collect()
     torch.npu.empty_cache()
-    dense_mask = _build_dense_mask(mask_func, problem)
-    _sync()
-    n_element=dense_mask.to("cpu").sum().item()
+    if SEQ_LEN <= MAX_DENSE_SEQ:
+        dense_mask = _build_dense_mask(mask_func, problem)
+        _sync()
+        n_element = dense_mask.to("cpu").sum().item()
+    else:
+        # 大序列：分块统计激活元素，避免物化 [S,S] 稠密 mask 导致 OOM
+        n_element = _count_n_element(mask_func, problem)
     print(">>>>>>>>>>>>>>>>>>>>>>>>>>>dense_mask.sum().item() in perf", n_element)
     results["mojo_packed"] = _perf_benchmark(
         "mojo_packed",
@@ -218,43 +228,67 @@ def _perf_flex_attention(mask_func, problem=None):
         n_element,
     )
 
-    # ascendc: torch SDPA + dense_mask
+    # ascendc: torch SDPA + dense_mask（仅小序列，大序列避免物化稠密 mask）
     gc.collect()
     torch.npu.empty_cache()
 
-    results["ascendc"] = _perf_benchmark(
-        "ascendc",
-        lambda: _build_dense_mask(mask_func, problem),
-        lambda q, k, v, m: _sdpa_with_dense_mask(q, k, v, m, 0.0, None),
-        problem["q"], problem["k"], problem["v"],
-        prof_dir_root,
-        mask_func,
-        None
-    )
+    if SEQ_LEN <= MAX_DENSE_SEQ:
+        results["ascendc"] = _perf_benchmark(
+            "ascendc",
+            lambda: _build_dense_mask(mask_func, problem),
+            lambda q, k, v, m: _sdpa_with_dense_mask(q, k, v, m, 0.0, None),
+            problem["q"], problem["k"], problem["v"],
+            prof_dir_root,
+            mask_func,
+            None
+        )
     return results
+
+# ============================================================================
+# 分块统计 mask 激活元素（大序列避免物化全量稠密 mask）
+# ============================================================================
+MAX_DENSE_SEQ = 20000
+
+
+def _count_n_element(mask_func, problem, q_chunk=512):
+    """分块统计 mask 激活元素个数，避免物化全量稠密 mask。
+
+    使用广播优化：q_idx [cb,1] + kv_idx [1,S]，mask_mod 内部自动广播到 [cb,S]，
+    gather 次数从 cb×S 降为 cb+S。在 NPU 上计算（元素级 bool 运算快），
+    1D 索引张量转 int32 减半内存。
+    """
+    npu_problem = {}
+    for key, val in problem.items():
+        if isinstance(val, torch.Tensor):
+            t = val.detach()
+            if t.dtype in (torch.int64, torch.long) and t.dim() == 1:
+                t = t.to(torch.int32)
+            npu_problem[key] = t
+        else:
+            npu_problem[key] = val
+    mask_mod = mask_func(npu_problem)
+    S = problem["total_s"]
+    device = problem["q"].device
+    total = 0
+    for qs in range(0, S, q_chunk):
+        qe = min(qs + q_chunk, S)
+        q_idx = torch.arange(qs, qe, device=device, dtype=torch.int32)[:, None]
+        kv_idx = torch.arange(0, S, device=device, dtype=torch.int32)[None, :]
+        with torch.no_grad():
+            m = mask_mod(0, 0, q_idx, kv_idx)
+        total += int(m.sum().item())
+        del m, q_idx, kv_idx
+    return total
+
+
+import random as _random  
+
 
 @pytest.mark.parametrize(
     "batch_size,q_head, kv_head, head_dim, data_lens, data_types, sliding_windows, global_windows, dtype, mask_func,",
-    [     
-        pytest.param(1, 16, 8, 128, [[2000, 22000, 2000], [2000, 22000, 2000]],[["text", "image_gen", "text"], 
-            ["text", "image_gen", "text"]], 1024, 4, torch.bfloat16, _sparse_mask_mod,id="sparse_2000_22000"), 
-
-        pytest.param(1, 16, 8, 128, [[2000, 22000, 2000], [2000, 22000, 2000]],[["text", "image_gen", "text"], 
-                    ["text", "image_gen", "text"]], 1024, 4, torch.bfloat16, _full_mask_mod,id="full_2000_22000"), 
-
-        pytest.param(1, 16, 8, 128, [[2000, 22000, 2000], [2000, 22000, 2000]],[["text", "image_gen", "text"], 
-                            ["text", "image_gen", "text"]], 1024, 4, torch.bfloat16, _cross_sample_causal_video_bidir_mask_mod,id="cross_2000_22000"), 
-
-        pytest.param(1, 16, 8, 128, [[6500, 6500, 6500, 6500], [6500, 6500, 6500, 6500]],[
-                        [[3000, 2000, 1500], [4000, 2500], [1500, 1500, 1500, 2000], [6500]],
-                        [[3500, 3000], [1000, 2000, 1500, 2000], [2000, 2500, 2000], [6500]],], 1024, 4, torch.bfloat16, _video_stair_mask_mod,id="video_stair_6500"), 
-
-        pytest.param(1, 16, 8, 128, [[6500, 6500, 6500, 6500], [6500, 6500, 6500, 6500]],[
-                        [[3000, 2000, 1500], [4000, 2500], [1500, 1500, 1500, 2000], [6500]],
-                        [[3500, 3000], [1000, 2000, 1500, 2000], [2000, 2500, 2000], [6500]],], 1024, 4, torch.bfloat16, _stair_mask_mod,id="stair_6500"), 
-      
-    ]
-   
+    # 共用固定用例前 3 个（sparse 5k/9k/70k）
+     _COMMON_FIXED_CASES + _RANDOM_CASES
+     + _MIXED_SEG_CASES + _MULTI_SAMPLE_CASES
 )
 @pytest.mark.skipif(get_platform() != "npu", reason="FlexAttention TTX backend requires NPU")
 @auto_switch_platform(set_perf=True)

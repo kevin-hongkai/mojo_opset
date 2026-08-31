@@ -268,9 +268,9 @@ def _sdpa_chunked_reference_backward(q, k, v, mask_func, problem, grad_output, q
     B, H, S, D = q.shape
     device = q.device
 
-    gq = torch.zeros_like(q)
-    gk = torch.zeros_like(k)
-    gv = torch.zeros_like(v)
+    gq = torch.zeros_like(q).to(torch.float32)
+    gk = torch.zeros_like(k).to(torch.float32)
+    gv = torch.zeros_like(v).to(torch.float32)
 
     # grad_output 是 [B, S, H, D]，转成 [B, H, S, D] 匹配 attn 输出
     grad_attn_full = grad_output.transpose(1, 2).contiguous()  # [B, H, S, D]
@@ -311,7 +311,7 @@ def _sdpa_chunked_reference_backward(q, k, v, mask_func, problem, grad_output, q
         del m, q_idx, kv_idx, col_any, nz, m_slice, qc, kc, vc, attn, grad_chunk
         if ci % 50 == 49:
             torch.npu.empty_cache()
-    return gq, gk, gv
+    return gq.to(q.dtype), gk.to(k.dtype), gv.to(v.dtype)
 
 
 def _count_n_element(mask_func, problem, q_chunk=512):

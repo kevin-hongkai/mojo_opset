@@ -9,6 +9,7 @@ from mojo_opset import MojoSWAFunction
 from mojo_opset.tests.utils import assert_close
 from mojo_opset.tests.utils import auto_switch_platform
 from mojo_opset.tests.utils import bypass_not_implemented
+from mojo_opset.utils.platform import get_platform
 
 def _generate_window_mask_chunk(
     q_start: int,
@@ -181,8 +182,10 @@ def _chunked_swa_torch_backward(
         else:
             v_i_expanded = v_i_perm
 
-        dk_i = torch.zeros((kv_seq_len, n_kv_heads, head_dim), dtype=k.dtype, device=k.device)
-        dv_i = torch.zeros((kv_seq_len, n_kv_heads, head_dim), dtype=v.dtype, device=v.device)
+        # 使用 fp32 累加 dk/dv，避免长序列下 bf16 累加的舍入误差累积
+        # （全局 token 被所有 query 关注，bf16 累加次数过多导致精度损失）
+        dk_i = torch.zeros((kv_seq_len, n_kv_heads, head_dim), dtype=torch.float32, device=k.device)
+        dv_i = torch.zeros((kv_seq_len, n_kv_heads, head_dim), dtype=torch.float32, device=v.device)
 
         for qc_start in range(0, q_seq_len, q_chunk_size):
             qc_end = min(qc_start + q_chunk_size, q_seq_len)
@@ -234,11 +237,12 @@ def _chunked_swa_torch_backward(
                 p_reduced = p_chunk
                 do_reduced = do_chunk
 
-            dk_i += torch.bmm(ds_reduced.mT, q_reduced).permute(1, 0, 2)
-            dv_i += torch.bmm(p_reduced.mT, do_reduced).permute(1, 0, 2)
+            dk_i += torch.bmm(ds_reduced.mT, q_reduced).float().permute(1, 0, 2)
+            dv_i += torch.bmm(p_reduced.mT, do_reduced).float().permute(1, 0, 2)
 
-        dk[kv_batch_start:kv_batch_end] = dk_i
-        dv[kv_batch_start:kv_batch_end] = dv_i
+        dk[kv_batch_start:kv_batch_end] = dk_i.to(k.dtype)
+        dv[kv_batch_start:kv_batch_end] = dv_i.to(v.dtype)
+
 
     return dq, dk, dv
 
@@ -323,6 +327,10 @@ def test_swa_function(
     global_window: int,
     local_window: int,
 ):   
+    q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
+    max_q_len = q_lens.max().item()
+    if max_q_len > 8192 and get_platform() != "npu":
+        pytest.skip("large shape only on NPU, to avoid OOM on other platform")
     swa_func = MojoSWAFunction.apply
     
     swa_func_ref = MojoSWAFunction._registry.get("torch").apply
@@ -347,8 +355,6 @@ def test_swa_function(
         True,
     )
     o.backward(grad_out)
-    q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
-    max_q_len = q_lens.max().item()
     if max_q_len <= 8192:
         print(f"max_q_len {max_q_len}, use swa_func_ref")
         q_ref = query.clone().detach().requires_grad_(True)
@@ -375,19 +381,17 @@ def test_swa_function(
         assert_close(v.grad, v_ref.grad)
     else:
         print(f"max_q_len {max_q_len}, use chunked_swa_torch")
-        q_ref_cpu = query.detach()
-        k_ref_cpu = key.detach()
-        v_ref_cpu = value.detach()
-        do_ref_cpu = grad_out.detach()
-        cu_q_lens_cpu = cu_q_lens
-        cu_total_seq_lens_cpu = cu_total_seq_lens
+        q_ref = query.detach()
+        k_ref = key.detach()
+        v_ref = value.detach()
+        do_ref = grad_out.detach()
 
         o_ref_cpu, softmax_lse_ref, o_f32_ref = _chunked_swa_torch_forward(
-            q_ref_cpu,
-            k_ref_cpu,
-            v_ref_cpu,
-            cu_q_lens_cpu,
-            cu_total_seq_lens_cpu,
+            q_ref,
+            k_ref,
+            v_ref,
+            cu_q_lens,
+            cu_total_seq_lens,
             True,
             local_window,
             global_window,
@@ -396,14 +400,14 @@ def test_swa_function(
             True,
         )
         dq_ref, dk_ref, dv_ref = _chunked_swa_torch_backward(
-            do_ref_cpu,
-            q_ref_cpu,
-            k_ref_cpu,
-            v_ref_cpu,
+            do_ref,
+            q_ref,
+            k_ref,
+            v_ref,
             o_f32_ref,
             softmax_lse_ref,
-            cu_q_lens_cpu,
-            cu_total_seq_lens_cpu,
+            cu_q_lens,
+            cu_total_seq_lens,
             True,
             local_window,
             global_window,
@@ -411,7 +415,7 @@ def test_swa_function(
             gqa_interleave,
         )
 
-        assert_close(o, o_ref_cpu.npu())
-        assert_close(q.grad, dq_ref.npu())
-        assert_close(k.grad, dk_ref.npu())
-        assert_close(v.grad, dv_ref.npu())
+        assert_close(o, o_ref_cpu)
+        assert_close(q.grad, dq_ref)
+        assert_close(k.grad, dk_ref)
+        assert_close(v.grad, dv_ref)

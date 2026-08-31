@@ -18,9 +18,14 @@ from torch.nn.attention.flex_attention import create_block_mask
 
 # NPU device validation monkey-patch (same as original test)
 try:
-    from torch.nn.attention import flex_attention as _fa_module
-    _fa_module._validate_device = lambda q, k, v: None
-except Exception:
+    from mojo_opset.backends.ttx.kernels.npu.flex_attention import _build_packed_block_mask_streaming
+    from mojo_opset.backends.ttx.kernels.npu.flex_attention import create_block_mask_patched
+    from mojo_opset.backends.ttx.kernels.npu.flex_attention import triton_create_mask
+    from mojo_opset.backends.ttx.kernels.npu.flex_attention import MASK_BLOCK_SIZE
+    import torch_npu._inductor
+    from torch.nn.attention.flex_attention import flex_attention
+    from torch.nn.attention.flex_attention import create_block_mask
+except Exception as exc:
     pass
 
 GEN_MASK_TRITON = False
@@ -142,6 +147,7 @@ def _build_block_mask(mask_func, problem):
     SEQ_LEN = problem["total_s"]
     device=problem["q"].device
     if GEN_MASK_TRITON:
+        from mojo_opset.backends.ttx.kernels.npu.utils import is_910
         classify_strategy= "fused" if not is_910() else "decoupled"
         mask_type_str = _MASK_FUNC_TO_TYPE[id(mask_func)]
         packed_block_mask = _build_packed_block_mask_streaming(mask_type_str, problem, SEQ_LEN, Q_BLOCK_SIZE, KV_BLOCK_SIZE, classify_strategy=classify_strategy)

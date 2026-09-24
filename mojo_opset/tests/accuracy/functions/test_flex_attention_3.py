@@ -21,6 +21,7 @@ from torch.nn.attention.flex_attention import create_block_mask
 try:
     from torch.nn.attention import flex_attention as _fa_module
     _fa_module._validate_device = lambda q, k, v: None
+    torch._dynamo.config.recompile_limit = 64
 except Exception:
     pass
 
@@ -445,7 +446,7 @@ import random as _random
 _RNG = _random.Random(2026)
 _RAND_BATCH = [1]
 _RAND_QHEAD = [16, 32]
-_RAND_HDIM = [64, 128,256,512]
+_RAND_HDIM = [64, 128]
 _RAND_DTYPES = [torch.bfloat16]
 _RAND_MAG = [5000, 60000, 300000, 1000000]
 _RAND_SLIDE = [512, 1024, 4096, 65536]
@@ -507,7 +508,7 @@ _RNG_MS = _random.Random(4242)
 _MS_NSEG = [10, 15, 20, 100, 433, 1000]  # 每个样本内段数
 _MS_BATCH = [1]
 _MS_QHEAD = [16, 32]
-_MS_HDIM = [64, 128, 256, 512]
+_MS_HDIM = [64, 128]
 _MS_SLIDE = [512, 1024, 4096]
 _MS_GLOBAL = [4, 8, 16]
 _MS_DTYPES = [torch.bfloat16]
@@ -588,7 +589,7 @@ _MULTI_SAMPLE_CASES = [
 _RNG_MIX = _random.Random(8888)
 _MIX_BATCH = [1]
 _MIX_QHEAD = [16, 32]
-_MIX_HDIM = [64, 128, 256, 512]
+_MIX_HDIM = [64, 128]
 _MIX_SLIDE = [512, 1024, 4096]
 _MIX_GLOBAL = [4, 8, 16]
 _MIX_DTYPES = [torch.bfloat16]

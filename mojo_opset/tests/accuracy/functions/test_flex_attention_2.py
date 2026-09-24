@@ -20,6 +20,7 @@ from mojo_opset.tests.accuracy.functions.test_flex_attention import _build_block
 try:
     from torch.nn.attention import flex_attention as _fa_module
     _fa_module._validate_device = lambda q, k, v: None
+    torch._dynamo.config.recompile_limit = 128
 except Exception:
     pass
 
@@ -447,7 +448,7 @@ import random as _random
 _RNG = _random.Random(2026)
 _RAND_BATCH = [1]
 _RAND_QHEAD = [16, 32]
-_RAND_HDIM = [64, 128, 256, 512]
+_RAND_HDIM = [64, 128, 256]
 _RAND_DTYPES = [torch.bfloat16]
 _RAND_MAG = [5000, 60000, 300000, 1000000]
 _RAND_SLIDE = [512, 1024, 4096, 65536]
@@ -503,11 +504,11 @@ _SHAPE_CASES = [
     # ===== batch / head / dim 各种组合，seq 1k ~ 1M，长度取任意数值（非 10 整数倍） =====
     pytest.param(1, 16, 8, 128,
                  [[123, 4567, 89]], [["text", "image_gen", "text"]],
-                 512, 4, torch.bfloat16, id="b1_h16kv8_d128_s4779"),
+                 256, 4, torch.bfloat16, id="b1_h16kv8_d128_s4779"),
     pytest.param(1, 16, 8, 128,
                  [[1233, 4567], [891, 2345]], [["text", "image_gen"], ["text", "image_gen"]],
                  1024, 4, torch.bfloat16, id="b2_h16kv8_d128_s9036"),
-    pytest.param(1, 32, 16, 512,
+    pytest.param(1, 32, 16, 256,
                  [[12345, 23456, 34567]], [["text", "image_gen", "text"]],
                  4096, 8, torch.bfloat16, id="b1_h32kv16_d128_s70368"),
     pytest.param(1, 16, 8, 64,

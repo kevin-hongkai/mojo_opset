@@ -1,6 +1,7 @@
 import csv
 import gc
 import os
+import re
 
 import pytest
 import torch
@@ -27,6 +28,7 @@ from mojo_opset.tests.accuracy.functions.test_flex_attention_2 import _SHAPE_CAS
 try:
     from torch.nn.attention import flex_attention as _fa_module
     _fa_module._validate_device = lambda q, k, v: None
+    torch._dynamo.config.recompile_limit = 256
 except Exception:
     pass
 
@@ -120,20 +122,16 @@ def _perf_benchmark(label, build_mask_fn, fwd_fn, q, k, v, prof_dir_root, n_elem
             prof.step()
     print(f"======================== prof end ({label}) ====================")
     if n_element is not None and os.path.exists(prof_dir):
-        if USE_MOJO_FLEX_ATTENTION:
-            num_n_elements = {
-                                "flex_attention_backward_dkdv_kernel_tasklist": 8,
-                                "flex_attention_backward_dkdv_kernel": 8,
-                                "flex_attention_backward_dq_kernel": 6,
-                                "flex_attention_kernel":4,
-                            }
-        else:
-            num_n_elements = {
-                                "triton_flex_attention_bwd_dkdv_tasklist": 8,
-                                "triton_flex_attention_bwd_dkdv_mask_out": 8,
-                                "triton_flex_attention_bwd_dq_mask_out": 6,
-                                "triton_flex_attention_fwd_mask_out":4,
-                                        }
+        # 正则匹配 profiling kernel 名:
+        # 前向: flex_attention_kernel 或 flex_attention_fwd
+        # 反向: flex_attention_backward 或 flex_attention_bwd
+        # 排除 mask_compact/mask_pos 等辅助 kernel，只匹配主计算 kernel
+        num_n_elements = {
+                            r"flex_attention_(?:backward|bwd)(?!.*(?:compact|mask_pos)).*dkdv.*tasklist": 8,
+                            r"flex_attention_(?:backward|bwd)(?!.*(?:compact|mask_pos)).*dkdv": 8,
+                            r"flex_attention_(?:backward|bwd)(?!.*(?:compact|mask_pos)).*dq": 6,
+                             r"flex_attention_(?:kernel|fwd_mask_out)(?!.*(?:compact|mask_pos|workspace_offsets))": 4,
+                        }
         kernel_profiling_path = max(
             [
                 os.path.join(prof_dir, d)
@@ -151,7 +149,7 @@ def _perf_benchmark(label, build_mask_fn, fwd_fn, q, k, v, prof_dir_root, n_elem
                 for row in reader:
                     kernel_name = row["OP Type"]
                     for target,_ in num_n_elements.items():
-                        if target in kernel_name:
+                        if re.search(target, kernel_name):
                             kernel_times[target] = float(row["Avg Time(us)"])
                             break
 
@@ -251,6 +249,8 @@ _mask_func_param_2 = pytest.mark.parametrize(
 @bypass_not_implemented
 def test_flex_attention_perf_2(batch_size, q_head, kv_head, head_dim, data_lens, data_types,
                                sliding_windows, global_windows, dtype, mask_func):
+    print(f"batch_size {batch_size} q_head {q_head} kv_head {kv_head} head_dim {head_dim} data_lens {data_lens}")
+    print(f"sliding_windows {sliding_windows} global_windows {global_windows} dtype {dtype}")
     problem = build_problem(batch_size, q_head, kv_head, head_dim, data_lens, data_types,
                             sliding_windows, global_windows, dtype, mask_func)
     results = _perf_flex_attention_2(mask_func, problem)

@@ -20,7 +20,7 @@ from mojo_opset.tests.accuracy.functions.test_flex_attention import _build_block
 try:
     from torch.nn.attention import flex_attention as _fa_module
     _fa_module._validate_device = lambda q, k, v: None
-    torch._dynamo.config.recompile_limit = 128
+    torch._dynamo.config.recompile_limit = 256
 except Exception:
     pass
 
@@ -565,6 +565,8 @@ _mask_func_param_2 = pytest.mark.parametrize(
 @bypass_not_implemented
 def test_flex_attention_2(batch_size, q_head, kv_head, head_dim, data_lens, data_types,
                           sliding_windows, global_windows, dtype, mask_func):
+    print(f"batch_size {batch_size} q_head {q_head} kv_head {kv_head} head_dim {head_dim} data_lens {data_lens}")
+    print(f"sliding_windows {sliding_windows} global_windows {global_windows} dtype {dtype}")
     problem = build_problem(batch_size, q_head, kv_head, head_dim, data_lens, data_types,
                             sliding_windows, global_windows, dtype, mask_func)
 
